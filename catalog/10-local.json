@@ -1,0 +1,297 @@
+{
+  "schemaVersion": 1,
+  "products": [
+    {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "vendor": "Anthropic",
+      "homepage": "https://claude.com/product/claude-code",
+      "docs": "https://code.claude.com/docs/en/setup",
+      "kind": "cli",
+      "binaries": [
+        "claude"
+      ],
+      "packages": [
+        "@anthropic-ai/claude-code"
+      ],
+      "companionApps": [
+        "com.anthropic.claudefordesktop"
+      ],
+      "codeIdentifiers": [
+        "com.anthropic.claude-code"
+      ],
+      "paths": [
+        {
+          "path": "~/.local/share/claude",
+          "kind": "program",
+          "exclusive": true
+        },
+        {
+          "path": "~/.local/state/claude",
+          "kind": "data"
+        },
+        {
+          "path": "~/Library/Caches/claude-cli-nodejs",
+          "kind": "cache"
+        },
+        {
+          "path": "~/.claude",
+          "kind": "data",
+          "shared": true,
+          "note": "官方文档写明：VS Code 扩展、JetBrains 插件和桌面版也写这个位置"
+        },
+        {
+          "path": "~/.claude.json",
+          "kind": "config",
+          "shared": true,
+          "note": "官方文档写明：VS Code 扩展、JetBrains 插件和桌面版也写这个位置"
+        },
+        {
+          "path": "~/.claude.json.backup",
+          "kind": "config",
+          "shared": true,
+          "note": "官方文档写明：VS Code 扩展、JetBrains 插件和桌面版也写这个位置"
+        }
+      ],
+      "install": [
+        {
+          "channel": "script",
+          "command": "curl -fsSL https://claude.ai/install.sh | bash"
+        },
+        {
+          "channel": "brew",
+          "command": "brew install --cask claude-code"
+        },
+        {
+          "channel": "npm",
+          "command": "npm install -g @anthropic-ai/claude-code"
+        }
+      ]
+    },
+    {
+      "id": "codex",
+      "name": "Codex CLI",
+      "vendor": "OpenAI",
+      "homepage": "https://github.com/openai/codex",
+      "docs": "https://github.com/openai/codex",
+      "kind": "cli",
+      "binaries": [
+        "codex"
+      ],
+      "packages": [
+        "@openai/codex"
+      ],
+      "companionApps": [
+        "com.openai.codex"
+      ],
+      "paths": [
+        {
+          "path": "~/.codex",
+          "kind": "data",
+          "shared": true,
+          "note": "本机实测：ChatGPT.app（bundle id com.openai.codex）也在写这个目录"
+        },
+        {
+          "path": "~/.cache/codex-runtimes",
+          "kind": "cache",
+          "shared": true
+        }
+      ],
+      "install": [
+        {
+          "channel": "script",
+          "command": "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
+        },
+        {
+          "channel": "brew",
+          "command": "brew install --cask codex"
+        },
+        {
+          "channel": "npm",
+          "command": "npm install -g @openai/codex"
+        }
+      ]
+    },
+    {
+      "id": "grok-cli",
+      "name": "Grok CLI",
+      "vendor": "xAI",
+      "kind": "cli",
+      "binaries": [
+        "grok"
+      ],
+      "codeIdentifiers": [
+        "xai-grok-pager"
+      ],
+      "paths": [
+        {
+          "path": "~/.grok/downloads",
+          "kind": "program"
+        },
+        {
+          "path": "~/.grok/bin",
+          "kind": "program"
+        },
+        {
+          "path": "~/.grok/completions",
+          "kind": "program"
+        },
+        {
+          "path": "~/.grok/bundled",
+          "kind": "program"
+        },
+        {
+          "path": "~/.grok/docs",
+          "kind": "program"
+        },
+        {
+          "path": "~/.grok/logs",
+          "kind": "logs"
+        },
+        {
+          "path": "~/.grok/auth.json",
+          "kind": "credentials"
+        },
+        {
+          "path": "~/.grok",
+          "kind": "data",
+          "note": "会话、记忆、配置与插件"
+        }
+      ],
+      "note": "条目来自本机实测的目录结构；安装命令未核实，故不提供。"
+    },
+    {
+      "id": "qoder-cli",
+      "name": "Qoder CLI",
+      "vendor": "Qoder",
+      "kind": "cli",
+      "binaries": [
+        "qodercli",
+        "qoder"
+      ],
+      "companionApps": [
+        "com.qoder.app",
+        "com.qodercn.app"
+      ],
+      "codeIdentifiers": [
+        "qodercli"
+      ],
+      "paths": [
+        {
+          "path": "~/.qoder/bin/qodercli",
+          "kind": "program",
+          "note": "各版本的 qodercli 二进制，旧版本可展开后单独清理"
+        },
+        {
+          "path": "~/.qoder/entry",
+          "kind": "program",
+          "shared": true,
+          "note": "qoder 分发脚本，同时负责启动 Qoder 桌面版"
+        },
+        {
+          "path": "~/.qoder/.auth",
+          "kind": "credentials",
+          "shared": true
+        },
+        {
+          "path": "~/.qoder",
+          "kind": "data",
+          "shared": true
+        }
+      ],
+      "note": "条目来自本机实测的目录结构；安装命令未核实，故不提供。"
+    },
+    {
+      "id": "pi",
+      "name": "pi",
+      "vendor": "Earendil Works",
+      "kind": "cli",
+      "binaries": [
+        "pi"
+      ],
+      "packages": [
+        "@earendil-works/pi-coding-agent"
+      ],
+      "companionApps": [
+        "com.pi-gui.desktop"
+      ],
+      "versionFile": "~/.pi/agent/install/current-version",
+      "paths": [
+        {
+          "path": "~/.pi/agent/install",
+          "kind": "program"
+        },
+        {
+          "path": "~/.pi/agent/bin",
+          "kind": "program"
+        },
+        {
+          "path": "~/.pi/agent/auth.json",
+          "kind": "credentials"
+        },
+        {
+          "path": "~/.pi/agent/mcp.json",
+          "kind": "credentials",
+          "note": "MCP 服务配置，env 段里存有 API key"
+        },
+        {
+          "path": "~/.pi",
+          "kind": "data",
+          "shared": true
+        }
+      ],
+      "note": "条目来自本机实测的目录结构；安装命令未核实，故不提供。"
+    },
+    {
+      "id": "cursor-cli",
+      "name": "Cursor CLI",
+      "vendor": "Anysphere",
+      "homepage": "https://cursor.com/cli",
+      "docs": "https://cursor.com/docs/cli/installation",
+      "kind": "cli",
+      "binaries": [
+        "cursor-agent",
+        "agent"
+      ],
+      "companionApps": [
+        "com.todesktop.230313mzl4w4u92"
+      ],
+      "paths": [
+        {
+          "path": "~/.cursor",
+          "kind": "data",
+          "shared": true,
+          "note": "Cursor 编辑器与 Cursor CLI 共用"
+        }
+      ],
+      "install": [
+        {
+          "channel": "script",
+          "command": "curl https://cursor.com/install -fsS | bash"
+        }
+      ],
+      "note": "官方文档里安装后验证用的是 agent --version；cursor-agent 是它的旧名字。目录清单里两个都收，按签名身份优先匹配。"
+    },
+    {
+      "id": "codexbar",
+      "name": "CodexBar",
+      "vendor": "Peter Steinberger",
+      "kind": "app",
+      "bundleIDs": [
+        "com.steipete.codexbar"
+      ],
+      "paths": [
+        {
+          "path": "~/.codexbar",
+          "kind": "data",
+          "exclusive": true
+        },
+        {
+          "path": "~/.config/codexbar",
+          "kind": "config",
+          "exclusive": true
+        }
+      ]
+    }
+  ]
+}
