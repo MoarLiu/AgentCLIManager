@@ -10,9 +10,10 @@ struct DetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: UI.sectionGap) {
                     GroupHeader(group: group)
+                    if group.section != .managedByApp { TierSummary(group: group) }
                     if !group.notes.isEmpty { notes }
-                    if !group.binaries.isEmpty { BinariesSection(group: group) }
                     artifacts
+                    if !group.binaries.isEmpty { BinariesSection(group: group) }
                     if !group.rcLines.isEmpty { rcLines }
                     if !group.manualCommands.isEmpty || group.uninstallCommand != nil { manualCommands }
                 }
@@ -22,19 +23,33 @@ struct DetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             if group.section != .managedByApp {
-                Divider()
+                Hairline()
                 actionBar
             }
         }
-        .navigationTitle(group.name)
+        .background(Color.surfaceBase)
+        .overlay(alignment: .top) {
+            if !model.search.isEmpty {
+                Label("搜索只筛选侧栏，详情仍显示「\(group.name)」；勾选和计划没有被筛选改变。", systemImage: "line.3.horizontal.decrease.circle")
+                    .font(.acmCaption)
+                    .foregroundStyle(Color.textPrimary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.surfaceRaised, in: Capsule())
+                    .overlay { Capsule().strokeBorder(Color.lineControl, lineWidth: UI.hairline) }
+                    .padding(.top, 6)
+                    .help("当前工具可能不在搜索结果里。清空搜索可回到完整清单。")
+            }
+        }
+        .navigationTitle("Agent CLI Manager")
     }
 
     private var notes: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(group.notes, id: \.self) { note in
                 Label(note, systemImage: "info.circle")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .font(.acmCallout)
+                    .foregroundStyle(Color.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -54,46 +69,86 @@ struct DetailView: View {
         // 这一组里最大的那个条目，作为比例条的基准
         let largest = top.map { $0.size?.bytes ?? 0 }.max() ?? 0
 
-        return VStack(alignment: .leading, spacing: UI.sectionGap) {
+        return VStack(alignment: .leading, spacing: 12) {
             ForEach(kinds, id: \.self) { kind in
                 let items = top.filter { $0.kind == kind }
-                VStack(alignment: .leading, spacing: 8) {
-                    SectionHeader(title: kind.displayName, detail: hint(kind)) {
-                        if let size = ToolGroup.totalSize(of: items), items.count > 1 {
-                            Text("共 \(items.count) 项 · \(size.display)")
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    VStack(spacing: 0) {
-                        ForEach(Array(items.enumerated()), id: \.element.id) { index, artifact in
-                            ArtifactRow(artifact: artifact, group: group, largest: largest)
-                            if model.expanded.contains(artifact.path) {
-                                let children = model.children(of: artifact, in: group)
-                                if children.isEmpty {
-                                    Text("里面没有可以单独列出的子项")
-                                        .font(.caption)
-                                        .foregroundStyle(.tertiary)
-                                        .padding(.leading, UI.textIndent + 12)
-                                        .padding(.vertical, 8)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                } else {
-                                    ForEach(children) { child in
-                                        ArtifactRow(artifact: child, group: group, depth: 1, largest: largest)
-                                    }
+                VStack(spacing: 0) {
+                    groupHeader(kind, items: items)
+                    ForEach(items) { artifact in
+                        Hairline().padding(.horizontal, 10)
+                        ArtifactRow(artifact: artifact, group: group, largest: largest)
+                        if model.expanded.contains(artifact.path) {
+                            let children = model.children(of: artifact, in: group)
+                            if children.isEmpty {
+                                Text("里面没有可以单独列出的子项")
+                                    .font(.acmCaption)
+                                    .foregroundStyle(Color.textSecondary)
+                                    .padding(.leading, UI.textIndent + 10)
+                                    .padding(.vertical, 8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                ForEach(children) { child in
+                                    ArtifactRow(artifact: child, group: group, depth: 1, largest: largest)
                                 }
                             }
-                            if index < items.count - 1 {
-                                Divider().padding(.leading, UI.textIndent + 12)
-                            }
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 2)
-                    .background(Color.groupFill, in: RoundedRectangle(cornerRadius: UI.corner))
                 }
+                .padding(.vertical, 2)
+                .background(Color.groupFill, in: RoundedRectangle(cornerRadius: UI.corner))
             }
         }
+    }
+
+    /// 分组标题行：组勾选框 + 标题 + 一句说明 + 计数 + 合计。
+    private func groupHeader(_ kind: ArtifactKind, items: [Artifact]) -> some View {
+        let summary = model.kindSelectionSummary(kind, in: group)
+        let state: CheckState = switch summary.state {
+        case .none: .off
+        case .partial: .mixed
+        case .all: .on
+        case .protected: .protected
+        }
+        let sum = ToolGroup.totalSize(of: items)
+        return HStack(spacing: 8) {
+            if group.section != .managedByApp {
+                if kind == .credentials {
+                    Image(systemName: "key")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.textSecondary)
+                        .frame(width: UI.checkbox, height: UI.hitTarget)
+                        .help("登录凭据不参与全选，只能逐条勾选")
+                } else {
+                    ACMCheckbox(state: state, label: "勾选全部\(kind.displayName)") {
+                        model.toggleKind(kind, in: group)
+                    }
+                    .help(summary.state == .protected ? "这一组的条目都不能勾选"
+                          : summary.state == .partial
+                            ? "已覆盖 \(summary.picked)/\(summary.candidates) 项；点击先勾选这一组，再点一次全部取消（不含登录凭据）"
+                            : "勾选或取消这一组（不含登录凭据）")
+                }
+            }
+            Text(kind.displayName)
+                .font(.acmHeadline)
+                .foregroundStyle(Color.textPrimary)
+                .fixedSize()
+            Text(hint(kind) ?? "")
+                .font(.acmCaption)
+                .foregroundStyle(Color.textSecondary)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("\(items.count) 项")
+                .font(.acmCaption)
+                .foregroundStyle(Color.textSecondary)
+                .fixedSize()
+            Text(sum.map { $0.bytes == 0 ? "—" : $0.accurate ? $0.display : "≥ \($0.display)" } ?? (model.isMeasuring ? "…" : "—"))
+                .font(.acmMonoNum)
+                .foregroundStyle((sum?.bytes ?? 0) == 0 ? Color.textTertiary : Color.textPrimary)
+                .lineLimit(1)
+                .frame(width: UI.sizeColumn, alignment: .trailing)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 2)
     }
 
     private func hint(_ kind: ArtifactKind) -> String? {
@@ -103,7 +158,7 @@ struct DetailView: View {
         case .launcher: return "扫描发现的命令入口"
         case .cache, .logs: return "可以放心清理"
         case .data: return "会话、历史等；移走后工具里就找不回了"
-        case .config: return "设置"
+        case .config: return "设置；默认保留"
         case .credentials: return "默认不勾选，也不参与全选"
         case .other: return nil
         }
@@ -118,10 +173,11 @@ struct DetailView: View {
                 ForEach(group.rcLines, id: \.self) { rc in
                     VStack(alignment: .leading, spacing: 2) {
                         Text("\(model.show(rc.file)):\(rc.line)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(.acmCaption)
+                            .foregroundStyle(Color.textSecondary)
                         Text(rc.text)
-                            .font(.system(.caption, design: .monospaced))
+                            .font(.acmMonoPath)
+                            .foregroundStyle(Color.textPrimary)
                             .textSelection(.enabled)
                             .lineLimit(2)
                     }
@@ -142,8 +198,8 @@ struct DetailView: View {
             if let official = group.uninstallCommand, !group.manualCommands.contains(official) {
                 CommandLineView(command: official, runnable: true)
                 Text("这是厂商文档给出的卸载命令。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.acmCaption)
+                    .foregroundStyle(Color.textSecondary)
             }
         }
     }
@@ -159,139 +215,128 @@ struct DetailView: View {
             $0.flags.contains(.shared) || $0.flags.contains(.credentials) || $0.flags.contains(.inUse)
                 || !$0.foreignChildren.isEmpty || $0.strength != .certain
         }
-        return HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
+        return HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(outer.isEmpty
                          ? "没有勾选任何条目"
                          : "已选 \(outer.count) 项" + (swallowed > 0 ? "（连同里面的 \(swallowed) 个子项）" : ""))
-                        .font(.callout.weight(.medium))
+                        .font(.acmBodyMed)
+                        .foregroundStyle(Color.textPrimary)
+                        .lineLimit(1)
                     if let size = model.selectedSize(group), !outer.isEmpty {
-                        Text(size.display)
-                            .font(.callout.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                        Text(size.accurate ? size.display : "≥ \(size.display)")
+                            .font(.acmMonoNum)
+                            .foregroundStyle(Color.textPrimary)
+                    }
+                    if risky {
+                        Badge(text: "含需留意条目", color: .acmCaution,
+                              help: "含共用、凭据或归属不确定的条目，确认单里会逐条列出")
                     }
                 }
-                Text(outer.isEmpty
-                     ? selectionHint
-                     : risky
-                        ? "含共用、凭据或归属不确定的条目，确认单里会逐条列出"
-                        : "移到废纸篓不会立刻释放空间，清空后才释放")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text("默认保留配置、数据与凭据 · .ssh / .aws 全保护 · 只移废纸篓，不用 sudo")
+                    .font(.acmCaption)
+                    .foregroundStyle(Color.textSecondary)
                     .lineLimit(1)
+                    .help("移到废纸篓不会立刻释放空间，清空后才释放；本 App 不会替你清空废纸篓")
             }
+            .layoutPriority(0)
             Spacer(minLength: 8)
-            Menu("选择") {
+            Menu {
+                Text("勾选和取消都不改文件，只有确认单执行后才移动")
                 Button("恢复默认勾选") { model.selectDefaults(group) }
                 Button(group.section == .installed ? "连同配置和数据（不含登录凭据）" : "全选（不含登录凭据）") {
                     model.selectAll(group)
                 }
                 Divider()
                 Button("全部取消") { model.selectNone(group) }
+            } label: {
+                Text("选择")
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.visible)
             .fixedSize()
             .help("批量调整勾选")
 
-            Button {
+            Button("核对变更…") {
                 model.preparePlan(for: group)
-            } label: {
-                Label("移到废纸篓…", systemImage: "trash")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
+            .buttonStyle(.acmPrimary)
             .disabled(outer.isEmpty || model.isBusy || model.isScanning)
             .help("先看确认单，再决定要不要移走")
+            .layoutPriority(1)
         }
         .padding(.horizontal, UI.gutter)
-        .padding(.vertical, 10)
-        .background(.bar)
-    }
-
-    private var selectionHint: String {
-        switch group.section {
-        case .installed:
-            return "默认只勾程序、启动链接、缓存和日志；配置与数据要自己点"
-        case .residue:
-            return "确定的旧残留才默认勾选；最近写入或顶层目录仍要确认"
-        case .unidentified, .otherCLI:
-            return "归属不确定，默认不勾选；请确认后再清理"
-        case .managedByApp:
-            return "由桌面 App 使用，不在管理范围内"
-        }
+        .frame(height: 78)
+        .background(Color.surfaceBase)
     }
 }
 
 // MARK: - 头部
 
-/// 名称、来源、状态、占用、默认可清理量，一屏之内说清楚。
+/// 名称、来源、状态、占用，一屏之内说清楚。
 struct GroupHeader: View {
     let group: ToolGroup
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        let top = group.artifacts.filter { $0.parentPath == nil }
+        let partial = top.filter { $0.size == nil || $0.size?.accurate == false }.count
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 14) {
-                ToolIcon(name: group.name, section: group.section, size: 46)
-                VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .center, spacing: 12) {
+                ToolIcon(name: group.name, section: group.section, size: 40,
+                                 logo: ToolLogo.lookup(catalog: model.catalog, productID: group.productID,
+                                                       binaries: group.binaries.map(\.name),
+                                                       ownerApps: group.ownerApps))
+                VStack(alignment: .leading, spacing: 3) {
                     Text(group.name)
-                        .font(.title2.weight(.semibold))
+                        .font(.acmTitle)
+                        .foregroundStyle(Color.textPrimary)
+                        .lineLimit(1)
                     Text(facts)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                        .font(.acmCallout)
+                        .foregroundStyle(Color.textSecondary)
                         .lineLimit(2)
                 }
                 Spacer(minLength: 16)
                 VStack(alignment: .trailing, spacing: 2) {
                     Text(group.totalSize?.display ?? (model.isMeasuring ? "…" : "—"))
-                        .font(.system(.title2, design: .rounded).weight(.medium).monospacedDigit())
-                    Text("总占用")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.acmMonoDisplay)
+                        .foregroundStyle(Color.textPrimary)
+                        .lineLimit(1)
+                    Text("\(top.count) 项" + (partial > 0 ? " · \(partial) 项未量全" : ""))
+                        .font(.acmCaption)
+                        .foregroundStyle(Color.textSecondary)
                 }
+                .fixedSize()
             }
             HStack(spacing: 6) {
                 if group.isRunning {
-                    Badge(text: "正在运行", color: .green, filled: true,
+                    Badge(text: "正在运行", color: .acmCaution, filled: true,
                           help: "PID " + group.runningPIDs.map(String.init).joined(separator: "、"))
                 }
-                if group.section == .residue { Badge(text: "程序已不在", color: .orange) }
-                if group.section == .unidentified { Badge(text: "归属不明", color: .orange, help: "默认都不勾选，请自己判断") }
+                if group.section == .residue { Badge(text: "程序已不在", color: .acmCaution) }
+                if group.section == .unidentified { Badge(text: "归属不明", color: .acmCaution, help: "默认都不勾选，请自己判断") }
                 if let shared = sharedSummary {
-                    Badge(text: shared, color: .orange, help: "已安装的桌面 App 也在用这些位置，移走会影响它")
+                    Badge(text: shared, color: .acmCaution, help: "已安装的桌面 App 也在用这些位置，移走会影响它")
                 }
                 if group.binaries.contains(where: { $0.invalidTarget != nil }) {
-                    Badge(text: "有命令入口异常", color: .orange, help: "入口指向的不是可执行程序，详见下方命令区")
+                    Badge(text: "有命令入口异常", color: .acmCaution, help: "入口指向的不是可执行程序，详见下方命令区")
                 }
+                Text(group.section.explanation)
+                    .font(.acmCaption)
+                    .foregroundStyle(Color.textSecondary)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
                 if let docs = group.docs ?? group.homepage, let url = URL(string: docs) {
                     Link(destination: url) {
-                        Label("官方文档", systemImage: "safari")
-                            .font(.caption)
+                        Label("官方文档", systemImage: "arrow.up.right")
+                            .font(.acmCaption)
+                            .foregroundStyle(Color.textSecondary)
                     }
+                    .fixedSize()
                 }
-                Spacer(minLength: 0)
             }
-            Text(group.section.explanation)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if group.section != .managedByApp, let clean = defaultCleanable {
-                Label(defaultCleanableText(clean), systemImage: "checkmark.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    private func defaultCleanableText(_ clean: SizeResult) -> String {
-        switch group.section {
-        case .installed:
-            return "默认勾选可清理 \(clean.display)，配置、数据和登录凭据默认保留"
-        case .residue:
-            return "默认勾选可清理 \(clean.display)；最近写入、共用和归属不确定的条目默认保留"
-        case .unidentified, .otherCLI, .managedByApp:
-            return "默认勾选可清理 \(clean.display)；登录凭据默认保留"
         }
     }
 
@@ -309,7 +354,7 @@ struct GroupHeader: View {
         case .managedByApp:
             if let app = group.ownerApps.first { parts.append(app.bundleID) }
         }
-        return parts.joined(separator: "  ·  ")
+        return parts.isEmpty ? group.section.displayName : parts.joined(separator: "  ·  ")
     }
 
     private var sharedSummary: String? {
@@ -319,10 +364,52 @@ struct GroupHeader: View {
         guard !names.isEmpty else { return nil }
         return "与 " + names.joined(separator: "、") + " 共用"
     }
+}
+
+/// 「归属判定」摘要：三档各多少条 + 这一类工具的默认勾选策略。
+struct TierSummary: View {
+    let group: ToolGroup
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let top = group.artifacts.filter { $0.parentPath == nil }
+        HStack(alignment: .center, spacing: 14) {
+            Text("归属判定")
+                .font(.acmHeadline)
+                .foregroundStyle(Color.textPrimary)
+                .fixedSize()
+            ForEach(Tier.allCases, id: \.self) { tier in
+                TierTag(tier: tier, count: top.filter { Tier($0.strength) == tier }.count)
+            }
+            Text(policy)
+                .font(.acmCaption)
+                .foregroundStyle(Color.textSecondary)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .multilineTextAlignment(.trailing)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.groupFill, in: RoundedRectangle(cornerRadius: UI.corner))
+    }
 
     /// 默认勾选里最外层那些条目的合计。
     private var defaultCleanable: SizeResult? {
         ToolGroup.totalSize(of: group.artifacts.filter { $0.defaultSelected && $0.parentPath == nil })
+    }
+
+    private var policy: String {
+        let clean = defaultCleanable.map { "默认勾选可清理 \($0.display)；" } ?? ""
+        switch group.section {
+        case .installed:
+            return clean + "只有「确定」才默认勾选，配置、数据和登录凭据默认保留"
+        case .residue:
+            return clean + "确定的旧残留才默认勾选；最近写入、共用和顶层目录仍要你确认"
+        case .unidentified, .otherCLI:
+            return "归属不确定，默认都不勾选；请确认后再清理"
+        case .managedByApp:
+            return "由桌面 App 使用，不在管理范围内"
+        }
     }
 }
 
@@ -338,15 +425,15 @@ struct BinariesSection: View {
         VStack(alignment: .leading, spacing: 8) {
             SectionHeader(title: "命令", detail: "按扫描顺序列出；实际 PATH 优先级未确认") {
                 Text("\(group.binaries.count) 个入口")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.acmCaption)
+                    .foregroundStyle(Color.textSecondary)
             }
             VStack(spacing: 0) {
                 ForEach(Array(group.binaries.enumerated()), id: \.element.path) { index, binary in
                     BinaryRow(binary: binary,
                               hasDuplicate: group.binaries.contains(where: { $0.name == binary.name && $0.path != binary.path }))
                     if index < group.binaries.count - 1 {
-                        Divider().padding(.leading, 12)
+                        Hairline().padding(.leading, 12)
                     }
                 }
             }
@@ -368,23 +455,23 @@ struct BinaryRow: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Text(binary.name)
-                    .font(.system(.callout, design: .monospaced).weight(.semibold))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 if hasDuplicate {
-                    Badge(text: "同名入口", color: .secondary,
+                    Badge(text: "同名入口", color: .textSecondary,
                           help: "扫描发现多个同名入口；实际 shell PATH 优先级未确认")
                 }
                 if binary.isDangling {
-                    Badge(text: "悬空", color: .secondary, help: "它指向的东西已经不存在")
+                    Badge(text: "悬空", color: .textSecondary, help: "它指向的东西已经不存在")
                 }
                 if let target = binary.brokenShimTarget {
-                    Badge(text: "已失效", color: .orange, help: "启动脚本 exec 的程序已不存在：\(target)")
+                    Badge(text: "已失效", color: .acmCaution, help: "启动脚本 exec 的程序已不存在：\(target)")
                 }
                 if let invalid = binary.invalidTarget {
-                    Badge(text: "入口异常", color: .orange,
+                    Badge(text: "入口异常", color: .acmCaution,
                           help: "入口最终指向的不是可执行程序，而是\(invalid)")
                 }
                 if let identifier = binary.signIdentifier, identifier != "-" {
-                    Badge(text: "签名 " + identifier, color: .secondary,
+                    Badge(text: "签名 " + identifier, color: .textSecondary,
                           help: binary.teamID.map { "团队 ID \($0)" } ?? "没有团队 ID")
                 }
                 Spacer(minLength: 0)
@@ -399,20 +486,20 @@ struct BinaryRow: View {
         let chain = binary.chain
         if chain.count <= 1 {
             Text(chain.first.map { model.show($0) } ?? model.show(binary.path))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(.acmMonoPath)
+                .foregroundStyle(Color.textSecondary)
                 .textSelection(.enabled)
         } else {
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(Array(chain.enumerated()), id: \.offset) { index, link in
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(index == 0 ? "入口" : (index == chain.count - 1 ? "链路目标" : "链接到"))
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                            .font(.acmMicroMed)
+                            .foregroundStyle(Color.textTertiary)
                             .frame(width: 48, alignment: .trailing)
                         Text(model.show(link))
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(index == chain.count - 1 ? Color.primary : Color.secondary)
+                            .font(.acmMonoPath)
+                            .foregroundStyle(index == chain.count - 1 ? Color.textPrimary : Color.textSecondary)
                             .textSelection(.enabled)
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
@@ -425,6 +512,7 @@ struct BinaryRow: View {
 
 // MARK: - 文件行
 
+/// 清单行：证据常驻第二行，不藏在悬停里。
 struct ArtifactRow: View {
     let artifact: Artifact
     let group: ToolGroup
@@ -438,19 +526,17 @@ struct ArtifactRow: View {
     var body: some View {
         let implied = model.isImplied(artifact, in: group)
         let selectable = model.canSelect(artifact, in: group)
+        let picked = model.isEffectivelySelected(artifact, in: group)
 
         HStack(alignment: .center, spacing: 8) {
             if group.section != .managedByApp {
-                Toggle("", isOn: Binding(
-                    get: { implied || model.isSelected(artifact, in: group) },
-                    set: { model.setSelected(artifact, in: group, $0) }
-                ))
-                .toggleStyle(.checkbox)
-                .labelsHidden()
-                .disabled(!selectable || implied)
-                .frame(width: 16)
-                .help(implied ? "上级目录已勾选，这一项会被一并移走" : "勾选后随「移到废纸篓」一起处理")
-                .accessibilityLabel("勾选 \(PathUtil.lastComponent(artifact.path))")
+                ACMCheckbox(state: !selectable ? .protected : picked ? .on : .off,
+                            enabled: !implied,
+                            label: "勾选 \(PathUtil.lastComponent(artifact.path))") {
+                    model.setSelected(artifact, in: group, !model.isSelected(artifact, in: group))
+                }
+                .help(!selectable ? (artifact.notRemovableReason ?? "受保护，不能勾选")
+                      : implied ? "上级目录已勾选，这一项会被一并移走" : "勾选后进入「核对变更」的清单")
             }
 
             if artifact.expandable && depth == 0 {
@@ -460,11 +546,11 @@ struct ArtifactRow: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
                         .rotationEffect(.degrees(model.expanded.contains(artifact.path) ? 90 : 0))
-                        .frame(width: 16, height: 20)
+                        .frame(width: 16, height: UI.hitTarget)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.textSecondary)
                 .accessibilityLabel(model.expanded.contains(artifact.path) ? "收起子项" : "展开一层")
                 .help("展开一层，可以只清理里面的某几项")
             } else {
@@ -472,63 +558,65 @@ struct ArtifactRow: View {
             }
 
             Image(systemName: symbol)
-                .font(.callout)
-                .foregroundStyle(tint)
+                .font(.system(size: 13))
+                .foregroundStyle(Color.textSecondary)
                 .frame(width: 18)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(depth == 0 ? artifact.display(home: model.env.home) : PathUtil.lastComponent(artifact.path))
-                    .font(.system(.callout, design: depth == 0 ? .monospaced : .default))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(artifact.path)
-                if hasDetail {
-                    HStack(spacing: 5) {
-                        FlagBadges(artifact: artifact, section: group.section)
-                        if let foreign = foreignSummary {
-                            Text(foreign)
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                                .lineLimit(1)
-                                .help(foreign)
-                        }
-                        if let note = artifact.note {
-                            Text(note)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .help(note)
-                        }
-                    }
+                HStack(spacing: 6) {
+                    Text(depth == 0 ? artifact.display(home: model.env.home) : PathUtil.lastComponent(artifact.path))
+                        .font(.acmMonoNum)
+                        .foregroundStyle(Color.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(artifact.path)
+                        .layoutPriority(1)
+                    FlagBadges(artifact: artifact, section: group.section)
+                }
+                HStack(spacing: 6) {
+                    TierTag(tier: Tier(artifact.strength))
+                    Text(reason)
+                        .font(.acmCaption)
+                        .foregroundStyle(foreignBlocked ? Color.acmCaution : Color.textSecondary)
+                        .lineLimit(1)
+                        .help(reason)
                 }
             }
-            .layoutPriority(1)
-
-            Spacer(minLength: 10)
-
-            VStack(alignment: .trailing, spacing: 4) {
-                Text(sizeText)
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .help(sizeHelp)
-                if depth == 0, let bytes = artifact.size?.bytes, bytes > 0, largest > 0 {
-                    SizeBar(fraction: Double(bytes) / Double(largest), color: .secondary)
-                }
-            }
-            .frame(width: UI.sizeColumn, alignment: .trailing)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
 
             RowActions(
                 onEvidence: { showEvidence = true },
                 onReveal: { model.reveal(artifact.path) },
                 emphasized: hovering || focused
             )
+
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(sizeText)
+                    .font(.acmMonoNum)
+                    .foregroundStyle(sizeText == "—" ? Color.textTertiary : Color.textPrimary)
+                    .lineLimit(1)
+                    .help(sizeHelp)
+                if depth == 0 {
+                    SizeBar(fraction: largest > 0 ? Double(artifact.size?.bytes ?? 0) / Double(largest) : 0)
+                }
+            }
+            .frame(width: UI.sizeColumn, alignment: .trailing)
         }
-        .padding(.leading, depth == 0 ? 0 : UI.textIndent - 16)
-        .padding(.vertical, 7)
-        .background(hovering ? Color.rowHover : Color.clear, in: RoundedRectangle(cornerRadius: 5))
+        .padding(.leading, depth == 0 ? 10 : 10 + UI.textIndent - 16 - 8 - 18)
+        .padding(.trailing, 10)
+        .padding(.vertical, 4)
+        .background(hovering ? Color.rowHover : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+        .overlay {
+            if focused {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.textPrimary, lineWidth: UI.focusWidth)
+            }
+        }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .focusable()
+        .focusEffectDisabled()
         .focused($focused)
         // 空格勾选当前行；回车展开
         .onKeyPress(.space) {
@@ -554,18 +642,9 @@ struct ArtifactRow: View {
                 Button("复制完整路径") { model.copy(artifact.path) }
             }
         }
-        .popover(isPresented: $showEvidence, arrowEdge: .trailing) {
-            EvidenceView(artifact: artifact)
+        .sheet(isPresented: $showEvidence) {
+            EvidenceView(artifact: artifact, group: group)
         }
-    }
-
-    private var isPicked: Bool {
-        model.isImplied(artifact, in: group) || model.isSelected(artifact, in: group)
-    }
-
-    private var hasDetail: Bool {
-        !artifact.flags.isEmpty || artifact.note != nil || !artifact.foreignChildren.isEmpty
-            || artifact.strength != .certain
     }
 
     private var symbol: String {
@@ -575,25 +654,33 @@ struct ArtifactRow: View {
         return "doc"
     }
 
-    private var tint: Color {
-        if artifact.flags.contains(.credentials) { return .orange }
-        return .secondary
+    private var foreignBlocked: Bool {
+        artifact.foreignChildren.contains { $0.blocksRemoval }
     }
 
-    /// 一句话点出目录里属于别处的条目；完整清单在证据气泡里。
-    private var foreignSummary: String? {
-        guard let first = artifact.foreignChildren.first else { return nil }
-        let name = PathUtil.lastComponent(first.path) + "/"
-        let rest = artifact.foreignChildren.count > 1 ? " 等 \(artifact.foreignChildren.count) 项" : ""
-        let blocked = artifact.foreignChildren.contains(where: { $0.blocksRemoval })
-        return "内含 \(first.owner) 的 \(name)\(rest)" + (blocked ? "，整个目录不能移走；展开后可只清理其余子项" : "，移走外层会一并带走")
+    /// 常驻的证据理由：先说里面属于别处的条目，再给最强的一条判据。
+    private var reason: String {
+        var parts: [String] = []
+        if let first = artifact.foreignChildren.first {
+            let name = PathUtil.lastComponent(first.path) + "/"
+            let rest = artifact.foreignChildren.count > 1 ? " 等 \(artifact.foreignChildren.count) 项" : ""
+            parts.append("内含 \(first.owner) 的 \(name)\(rest)"
+                         + (foreignBlocked ? "，整个目录不能移走；展开后可只清理其余子项" : "，移走外层会一并带走"))
+        }
+        if let evidence = artifact.evidence.max(by: { $0.strength < $1.strength }) ?? artifact.evidence.first {
+            parts.append("\(evidence.kind)：\(evidence.detail)")
+        } else {
+            parts.append(artifact.claim.displayName)
+        }
+        if let note = artifact.note { parts.append(note) }
+        return parts.joined(separator: " · ")
     }
 
     /// 只含软链的目录、悬空软链本身，占不了什么空间，显示「—」比「0 字节」清楚。
     private var sizeText: String {
         guard let size = artifact.size else { return model.isMeasuring ? "…" : "—" }
         if size.bytes == 0, artifact.isDirectory || artifact.isSymlink { return "—" }
-        return size.display
+        return size.accurate ? size.display : "≥ \(size.display)"
     }
 
     private var sizeHelp: String {

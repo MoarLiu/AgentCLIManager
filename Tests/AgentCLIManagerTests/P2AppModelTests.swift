@@ -239,6 +239,114 @@ import Testing
         #expect(model.banner?.contains("没能保存撤销回执") == true)
         #expect(model.bannerIsError)
     }
+
+    @Test func groupSelectionIncludesDescendantsButGroupActionOnlyTouchesTopLevel() async throws {
+        let fixture = try GUIFixture()
+        let model = fixture.model()
+        let parent = Artifact(path: fixture.home + "/.tool", kind: .program, claim: .ownedByCLI,
+                              strength: .certain, isDirectory: true)
+        var child = Artifact(path: fixture.home + "/.tool/versions/2", kind: .program,
+                             claim: .ownedByCLI, strength: .certain)
+        child.parentPath = parent.path
+        let credential = Artifact(path: fixture.home + "/.tool/token", kind: .credentials,
+                                  claim: .ownedByCLI, strength: .certain, flags: [.credentials])
+        let group = ToolGroup(id: "nested", name: "nested", section: .installed,
+                              artifacts: [parent, child, credential])
+        model.report = ScanReport(scannedAt: Date(), groups: [group])
+        model.selectedGroupID = group.id
+        model.setSelected(child, in: group, true)
+        #expect(model.selection[group.id]?.contains(child.path) == true)
+        #expect(model.kindSelection(.program, in: group) == .partial)
+        #expect(!model.isEffectivelySelected(parent, in: group))
+        let partialPlan = UninstallPlan(groupID: group.id, groupName: group.name, steps: [], skipped: [],
+                                        manualCommands: [], warnings: [], reclaimable: nil)
+        #expect(model.preservedTopLevelArtifacts(for: partialPlan).map(\.path) == [credential.path])
+        model.toggleKind(.program, in: group)
+        #expect(model.kindSelection(.program, in: group) == .all)
+        #expect(model.isSelected(parent, in: group))
+        #expect(model.isSelected(child, in: group))
+        model.toggleKind(.program, in: group)
+        #expect(model.kindSelection(.program, in: group) == .none)
+        #expect(!model.isSelected(parent, in: group))
+        #expect(!model.isSelected(child, in: group))
+        model.toggleKind(.credentials, in: group)
+        #expect(model.kindSelection(.credentials, in: group) == .protected)
+        #expect(!model.isSelected(credential, in: group))
+    }
+
+    @Test func confirmationBoundaryOnlyListsCompletelyUntouchedTopLevelPaths() async throws {
+        let fixture = try GUIFixture()
+        let model = fixture.model()
+        let untouched = Artifact(path: fixture.home + "/.keep", kind: .config,
+                                 claim: .ownedByCLI, strength: .certain)
+        let parent = Artifact(path: fixture.home + "/.tool", kind: .data,
+                              claim: .ownedByCLI, strength: .certain, isDirectory: true)
+        var child = Artifact(path: fixture.home + "/.tool/old-session", kind: .data,
+                             claim: .ownedByCLI, strength: .certain)
+        child.parentPath = parent.path
+        let group = ToolGroup(id: "boundary", name: "boundary", section: .installed,
+                              artifacts: [untouched, parent, child])
+        model.report = ScanReport(scannedAt: Date(), groups: [group])
+        model.selectedGroupID = group.id
+        model.setSelected(child, in: group, true)
+        let plan = UninstallPlan(groupID: group.id, groupName: group.name, steps: [], skipped: [],
+                                 manualCommands: [], warnings: [], reclaimable: nil)
+        let preserved = model.preservedTopLevelArtifacts(for: plan)
+        #expect(preserved.map(\.path) == [untouched.path])
+        model.setSelected(child, in: group, false)
+        #expect(model.preservedTopLevelArtifacts(for: plan).count == 2)
+    }
+
+    @Test func desktopAppUsesItsOwnBundleIconAndRejectsMissingApp() async throws {
+        let fixture = try GUIFixture()
+        let missing = AppInfo(name: "Missing", bundleID: "example.missing",
+                              path: fixture.home + "/Missing.app")
+        #expect(ToolLogo.appIcon(missing) == nil)
+        // 本机集成用例：只在明确的 Claude.app 存在时检查系统图标读取；
+        // 不存在时仍然验证了无效路径回退，不依赖开发机器必须安装 Claude。
+        let claudePath = "/Applications/Claude.app"
+        guard FileManager.default.fileExists(atPath: claudePath + "/Contents/Info.plist") else { return }
+        let claude = AppInfo(name: "Claude", bundleID: "com.anthropic.claudefordesktop",
+                             path: claudePath)
+        #expect(ToolLogo.appIcon(claude) != nil)
+        #expect(ToolLogo.lookup(catalog: Catalog(products: []), productID: nil,
+                                binaries: [], ownerApps: [claude]) != nil)
+    }
+
+    @Test func everyFreshPlanGetsANewConfirmationToken() async throws {
+        let fixture = try GUIFixture()
+        let model = fixture.model()
+        let group = ToolGroup(id: "confirm", name: "confirm", section: .installed)
+        model.report = ScanReport(scannedAt: Date(), groups: [group])
+        model.selectedGroupID = group.id
+        model.preparePlan(for: group)
+        let first = model.planConfirmationToken
+        #expect(first != nil)
+        model.preparePlan(for: group)
+        #expect(model.planConfirmationToken != nil)
+        #expect(model.planConfirmationToken != first)
+    }
+
+    @Test func searchDoesNotSilentlyChangeSelectionOrPlan() async throws {
+        let fixture = try GUIFixture()
+        let model = fixture.model()
+        let first = ToolGroup(id: "alpha", name: "Alpha", section: .installed, artifacts: [
+            Artifact(path: fixture.home + "/.alpha", kind: .program, claim: .ownedByCLI, strength: .certain)
+        ])
+        let second = ToolGroup(id: "beta", name: "Beta", section: .residue, artifacts: [
+            Artifact(path: fixture.home + "/.beta", kind: .cache, claim: .residue, strength: .certain)
+        ])
+        model.report = ScanReport(scannedAt: Date(), groups: [first, second])
+        model.selectedGroupID = first.id
+        model.selectAll(first)
+        let before = model.selection[first.id]
+        model.search = "Beta"
+        #expect(model.groups(in: .installed).isEmpty)
+        #expect(model.selectedGroupID == first.id)
+        #expect(model.selection[first.id] == before)
+        #expect(model.selectedGroup?.name == "Alpha")
+    }
+
 }
 
 private actor ScanGate {

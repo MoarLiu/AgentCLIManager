@@ -141,6 +141,13 @@ swift build --product acm
 
 改完清单后跑 `./scripts/embed-catalog.sh` 重新嵌入。
 
+工具标识放在 `assets/tool-logos/`，文件名与产品 `id` 一致；官方来源与授权主体见该目录下的 README。
+CLI 图标打进 app bundle，**运行时不联网取图**；没有对应文件的用首字母兜底。
+桌面 App 不维护一份独立 logo 清单：扫描已经给出 `.app` 路径，直接通过 `NSWorkspace.icon(forFile:)`
+读取 App 自己的图标（包括 `CFBundleIconFile`、`Assets.car` 与新版 `.icon`），并优先于同厂商 CLI 图标；
+读不到时才按精确 bundle id 匹配 CLI 内置图或回首字母，不按名称猜。
+更新图标跑 `./scripts/fetch-tool-logos.sh`（可只指定某几个 id），再重新 `./scripts/build-app.sh`。
+
 ## 已知限制
 
 - **不扫 `~/Library/Containers` 和 `Group Containers`**：首次访问会触发系统授权弹窗，留给后续版本做成用户主动点「加载」。

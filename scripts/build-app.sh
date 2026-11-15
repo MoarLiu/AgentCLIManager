@@ -55,6 +55,12 @@ if [ -f assets/AppIcon.icns ]; then
     cp assets/AppIcon.icns "$OUT/Contents/Resources/AppIcon.icns"
 fi
 
+# 工具标识：只读 bundle 内的图，运行时不联网
+if [ -d assets/tool-logos ]; then
+    mkdir -p "$OUT/Contents/Resources/tool-logos"
+    find assets/tool-logos -name '*.png' -exec cp {} "$OUT/Contents/Resources/tool-logos/" \;
+fi
+
 cat > "$OUT/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

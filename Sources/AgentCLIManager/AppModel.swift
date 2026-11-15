@@ -70,6 +70,8 @@ final class AppModel {
     var search = ""
 
     var plan: UninstallPlan?
+    /// 每份新计划都有自己的确认代号；弹窗据此清空上一次「已核对」。
+    var planConfirmationToken: String?
     var isExecuting = false
     var result: UninstallResult?
     private(set) var resultBatchID: UUID?
@@ -93,6 +95,7 @@ final class AppModel {
         set { undoLedger = UndoLedger(receipts: undoReceipts, groupName: newValue) }
     }
     var showInstall = false
+    var showRecovery = false
     private var operationMessage: String?
     private(set) var persistenceError: String?
     private var operationIsError = false
@@ -120,6 +123,8 @@ final class AppModel {
     /// 卸载或放回任一进行中，视图可用它同时禁用两类操作。
     var isBusy: Bool { isExecuting || isUndoing }
     var canUndoAll: Bool { snapshot == nil && !isBusy && !undoLedger.isEmpty }
+    /// 仅供界面显示「N 批未恢复」
+    var undoBatchCount: Int { undoLedger.batches.filter { !$0.receipts.isEmpty }.count }
     var canUndoResult: Bool {
         guard result != nil, snapshot == nil, !isBusy, let resultBatchID else { return false }
         return undoLedger.batches.contains { $0.id == resultBatchID && !$0.receipts.isEmpty }
@@ -262,6 +267,61 @@ final class AppModel {
         selection[group.id]?.contains(artifact.path) ?? false
     }
 
+    /// 只给界面用的展示状态。实际计划仍只读 selection，不能用「显示为勾选」扩大删除范围。
+    func isEffectivelySelected(_ artifact: Artifact, in group: ToolGroup) -> Bool {
+        isSelected(artifact, in: group) || isImplied(artifact, in: group)
+    }
+
+    /// 组状态覆盖已展开的子项，否则只勾一个子项会被误显示成全选。
+    /// 组动作只处理顶层条目；凭据仍只能逐条勾选。
+    enum KindSelection: Equatable {
+        case none, partial, all, protected
+    }
+
+    struct KindSelectionSummary: Equatable {
+        var state: KindSelection
+        var picked: Int
+        var candidates: Int
+    }
+
+    func kindSelectionSummary(_ kind: ArtifactKind, in group: ToolGroup) -> KindSelectionSummary {
+        let candidates = group.artifacts.filter {
+            canSelect($0, in: group) && !$0.flags.contains(.credentials)
+                && ($0.kind == kind || isDescendantOfKind($0, kind: kind, in: group))
+        }
+        let picked = candidates.filter { isEffectivelySelected($0, in: group) }.count
+        let state: KindSelection = candidates.isEmpty ? .protected
+            : picked == 0 ? .none : picked == candidates.count ? .all : .partial
+        return KindSelectionSummary(state: state, picked: picked, candidates: candidates.count)
+    }
+
+    func kindSelection(_ kind: ArtifactKind, in group: ToolGroup) -> KindSelection {
+        kindSelectionSummary(kind, in: group).state
+    }
+
+    func toggleKind(_ kind: ArtifactKind, in group: ToolGroup) {
+        let state = kindSelection(kind, in: group)
+        guard state != .protected else { return }
+        let turnOn = state != .all
+        for item in group.artifacts where item.kind == kind {
+            guard canSelect(item, in: group), !item.flags.contains(.credentials) else { continue }
+            setSelected(item, in: group, turnOn)
+        }
+    }
+
+    private func isDescendantOfKind(_ artifact: Artifact, kind: ArtifactKind, in group: ToolGroup) -> Bool {
+        guard let parentPath = artifact.parentPath else { return false }
+        return group.artifacts.contains { $0.path == parentPath && $0.kind == kind }
+    }
+
+    /// 组状态要覆盖「只勾了目录里的一个子项」；行本身仍只显示它自己是否会进入计划。
+    private func hasSelectionWithin(_ artifact: Artifact, in group: ToolGroup) -> Bool {
+        if isEffectivelySelected(artifact, in: group) { return true }
+        return (selection[group.id] ?? []).contains {
+            PathUtil.isStrictlyInside($0, artifact.path)
+        }
+    }
+
     /// 上级目录已勾选，这一项会被一并带走。
     func isImplied(_ artifact: Artifact, in group: ToolGroup) -> Bool {
         guard let chosen = selection[group.id] else { return false }
@@ -337,6 +397,18 @@ final class AppModel {
 
     // MARK: - 卸载
 
+    /// 给确认单显示「不会动」的真实顶层清单；这只是计划的展示投影，不参与计划生成。
+    func preservedTopLevelArtifacts(for plan: UninstallPlan) -> [Artifact] {
+        guard let group = executionGroup(for: plan) else { return [] }
+        let skipped = Set(plan.skipped.map(\.path))
+        return group.artifacts.filter {
+            artifact in
+            artifact.parentPath == nil && !hasSelectionWithin(artifact, in: group)
+                && !plan.steps.contains { $0.path == artifact.path }
+                && !skipped.contains(artifact.path)
+        }
+    }
+
     /// 生成计划前重新查一遍进程：扫描到现在可能已经过了很久。
     func preparePlan(for group: ToolGroup) {
         guard !isExecuting, !isUndoing, !isScanning else { return }
@@ -344,7 +416,9 @@ final class AppModel {
         let pids = runningPIDs(for: group)
         let fresh = groupWithRunningPIDs(group, pids: pids)
         plannedGroup = fresh
-        plan = makePlan(for: fresh, selected: selection[group.id] ?? [])
+        let newPlan = makePlan(for: fresh, selected: selection[group.id] ?? [])
+        planConfirmationToken = newPlan.token
+        plan = newPlan
     }
 
     func execute(_ plan: UninstallPlan) async {
@@ -516,7 +590,9 @@ final class AppModel {
         let fresh = groupWithRunningPIDs(group, pids: currentPIDs)
         let selected = selection[oldPlan.groupID] ?? Set(oldPlan.steps.map(\.path))
         plannedGroup = fresh
-        plan = makePlan(for: fresh, selected: selected)
+        let newPlan = makePlan(for: fresh, selected: selected)
+        planConfirmationToken = newPlan.token
+        plan = newPlan
         planNotice = decision.notice
         result = nil
     }

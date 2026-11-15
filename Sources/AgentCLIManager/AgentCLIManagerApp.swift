@@ -31,6 +31,8 @@ struct SnapshotOptions {
     var select: String?
     var sheet: String?
     var expand: String?
+    /// 只读截图：展开某个侧栏分组
+    var expandSection: String?
     var selectAll = false
     /// light / dark，用来检查两种外观
     var appearance: String?
@@ -52,6 +54,7 @@ struct SnapshotOptions {
         options.select = value("--select")
         options.sheet = value("--sheet")
         options.expand = value("--expand")
+        options.expandSection = value("--expand-section")
         options.selectAll = args.contains("--select-all")
         options.appearance = value("--appearance")
         options.size = value("--size")
@@ -96,6 +99,8 @@ enum Snapshotter {
             if let group = model.selectedGroup { model.preparePlan(for: group) }
         case "install":
             model.showInstall = true
+        case "recovery":
+            model.showRecovery = true
         default:
             break
         }

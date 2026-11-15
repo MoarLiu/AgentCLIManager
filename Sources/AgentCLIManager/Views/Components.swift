@@ -14,11 +14,7 @@ extension ACMCore.Section {
 
     var tint: Color {
         switch self {
-        case .installed: return .accentColor
-        case .residue: return .orange
-        case .unidentified: return .secondary
-        case .otherCLI: return .secondary
-        case .managedByApp: return .secondary
+        case .installed, .residue, .unidentified, .otherCLI, .managedByApp: return .textPrimary
         }
     }
 
@@ -57,143 +53,249 @@ struct FlagBadges: View {
     var body: some View {
         HStack(spacing: 4) {
             if artifact.flags.contains(.inUse) {
-                Badge(text: "正在使用", color: .red, filled: true, help: "这个工具的进程正在运行")
+                Badge(text: "正在使用", color: .acmDanger, filled: true, help: "这个工具的进程正在运行")
             }
             if artifact.foreignChildren.contains(where: { $0.blocksRemoval }) {
-                Badge(text: "内含其他 App 的数据", color: .orange,
+                Badge(text: "内含其他 App 的数据", color: .acmCaution,
                       help: "目录里有确定由桌面 App 使用的条目，整个目录不能移走；展开后可以只清理其余子项")
             } else if !artifact.foreignChildren.isEmpty {
-                Badge(text: "内含其他组的条目", color: .secondary,
+                Badge(text: "内含其他组的条目", color: .textSecondary,
                       help: "目录里有属于其他工具的条目，移走外层目录会一并带走")
             }
             if artifact.flags.contains(.shared) {
-                Badge(text: "与 \(artifact.ownerAppName ?? "桌面 App") 共用", color: .orange,
+                Badge(text: "与 \(artifact.ownerAppName ?? "桌面 App") 共用", color: .acmCaution,
                       help: "已安装的桌面 App 也在用这个位置，移走会影响它")
             }
             if artifact.flags.contains(.credentials) {
-                Badge(text: "登录凭据", color: .orange, help: "含 token 或密钥。移到废纸篓后仍可读取，也可能已进入 Time Machine")
+                Badge(text: "登录凭据", color: .acmCaution, help: "含 token 或密钥。移到废纸篓后仍可读取，也可能已进入 Time Machine")
             }
             if artifact.flags.contains(.invalidLauncher) {
-                Badge(text: "入口异常", color: .orange, help: "入口指向的不是可执行程序（例如指向一个目录）")
+                Badge(text: "入口异常", color: .acmCaution, help: "入口指向的不是可执行程序（例如指向一个目录）")
             }
             if artifact.flags.contains(.usedByOthers) {
-                Badge(text: "其他命令也在用", color: .secondary,
+                Badge(text: "其他命令也在用", color: .textSecondary,
                       help: "还有别的命令靠这个程序启动：" + artifact.alsoUsedBy.joined(separator: "、"))
             }
             if artifact.flags.contains(.brokenShim) {
-                Badge(text: "启动脚本已失效", color: .secondary)
+                Badge(text: "启动脚本已失效", color: .textSecondary)
             }
             if artifact.flags.contains(.danglingSymlink) {
-                Badge(text: "悬空软链", color: .secondary, help: "它指向的东西已经不存在")
+                Badge(text: "悬空软链", color: .textSecondary, help: "它指向的东西已经不存在")
             }
             // 在用的工具最近有写入是常态，只在判断残留时才有意义
             if artifact.flags.contains(.recentlyModified), section == .residue || section == .unidentified {
-                Badge(text: "最近有写入", color: .orange, help: "14 天内有改动，可能还有程序在用")
+                Badge(text: "最近有写入", color: .acmCaution, help: "14 天内有改动，可能还有程序在用")
             }
             if artifact.flags.contains(.rootOwned) {
-                Badge(text: "需要管理员", color: .secondary)
+                Badge(text: "需要管理员", color: .textSecondary)
             }
             if artifact.flags.contains(.partialSize) {
-                Badge(text: "大小未量全", color: .secondary, help: "有读不到的子目录，显示的大小只是下界")
+                Badge(text: "大小未量全", color: .textSecondary, help: "有读不到的子目录，显示的大小只是下界")
             }
             if artifact.flags.contains(.manualOnly) {
-                Badge(text: "由包管理器托管", color: .secondary, help: "请用下方给出的命令卸载")
+                Badge(text: "由包管理器托管", color: .textSecondary, help: "请用下方给出的命令卸载")
             } else if artifact.flags.contains(.notRemovable) {
-                Badge(text: "不可删除", color: .secondary, help: artifact.notRemovableReason)
-            }
-            if artifact.strength == .probable, artifact.claim != .usedByApp {
-                Badge(text: "推测", color: .secondary, help: "归属只是推测，不是确定的")
-            } else if artifact.strength == .speculative {
-                Badge(text: "存疑", color: .secondary, help: "证据很弱，归属只是推测")
+                Badge(text: "不可删除", color: .textSecondary, help: artifact.notRemovableReason)
             }
         }
     }
 }
 
+/// 「为什么这么判」：目标路径 → 判据 → 证据边界 → 选择策略 → 来源与时效。
 struct EvidenceView: View {
     let artifact: Artifact
+    let group: ToolGroup
     @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    @State private var copied = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("为什么这么判")
-                        .font(.headline)
-                    Text(model.show(artifact.path))
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("为什么这么判")
+                    .font(.acmTitle)
+                    .foregroundStyle(Color.textPrimary)
+                Text("归属判定只回答「它是谁的」，不替你决定要不要移走。")
+                    .font(.acmCallout)
+                    .foregroundStyle(Color.textSecondary)
+            }
 
-                HStack(spacing: 6) {
-                    Label(artifact.claim.displayName, systemImage: "scope")
-                        .font(.subheadline.weight(.medium))
-                    if artifact.strength != .certain {
-                        Badge(text: "归属只是推测", color: .orange)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    FlowSection(title: "目标路径", trailing: sizeText) {
+                        Text(artifact.path)
+                            .font(.acmMonoNum)
+                            .foregroundStyle(Color.textPrimary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(pathFacts)
+                            .font(.acmCaption)
+                            .foregroundStyle(Color.textSecondary)
                     }
-                }
 
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(Array(artifact.evidence.enumerated()), id: \.offset) { _, evidence in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(strengthName(evidence.strength))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .frame(width: 28, alignment: .leading)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(evidence.kind).font(.caption.weight(.semibold))
-                                Text(evidence.detail).font(.caption).foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
+                    FlowSection(title: "发现来源与判据", tone: tier == .unknown ? nil : tier.color) {
+                        HStack(spacing: 8) {
+                            TierTag(tier: tier)
+                            Text(artifact.claim.displayName)
+                                .font(.acmBodyMed)
+                                .foregroundStyle(Color.textPrimary)
+                        }
+                        if artifact.evidence.isEmpty {
+                            Text("没有可靠证据。")
+                                .font(.acmCallout)
+                                .foregroundStyle(Color.textSecondary)
+                        }
+                        ForEach(Array(artifact.evidence.enumerated()), id: \.offset) { _, evidence in
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                TierTag(tier: Tier(evidence.strength))
+                                    .frame(width: 44, alignment: .leading)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(evidence.kind)
+                                        .font(.acmCaptionMed)
+                                        .foregroundStyle(Color.textPrimary)
+                                    Text(evidence.detail)
+                                        .font(.acmCaption)
+                                        .foregroundStyle(Color.textSecondary)
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
                             }
                         }
                     }
-                }
 
-                if !artifact.foreignChildren.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("里面有属于别处的条目", systemImage: "folder.badge.person.crop")
-                            .font(.subheadline.weight(.medium))
+                    FlowSection(title: "证据边界", tone: boundaryIsCaution ? .acmCaution : nil) {
+                        ForEach(boundaries, id: \.self) { line in
+                            bullet(line)
+                        }
                         ForEach(artifact.foreignChildren, id: \.path) { child in
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(model.show(child.path))
-                                    .font(.system(.caption, design: .monospaced))
+                                    .font(.acmMonoPath)
+                                    .foregroundStyle(Color.textPrimary)
                                     .textSelection(.enabled)
                                 Text("属于 \(child.owner)"
                                      + (child.usedByApp ? "（桌面 App 在用）" : "")
                                      + (child.certain ? "" : "，归属只是推测")
                                      + (child.blocksRemoval ? "。这一项让整个目录不能移走；展开后可以只清理其余子项。" : "。移走外层目录会把它一并带走。"))
-                                    .font(.caption)
-                                    .foregroundStyle(child.blocksRemoval ? Color.orange : Color.secondary)
+                                    .font(.acmCaption)
+                                    .foregroundStyle(child.blocksRemoval ? Color.acmCaution : Color.textSecondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
-                }
 
-                if let reason = artifact.notRemovableReason {
-                    Label("不可删除：\(reason)", systemImage: "lock")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let modified = artifact.lastModified {
-                    Text("最近改动：\(modified.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    FlowSection(title: "选择策略") {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Image(systemName: policy.symbol)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Color.textSecondary)
+                                .frame(width: 14)
+                            Text(policy.text)
+                                .font(.acmCallout)
+                                .foregroundStyle(Color.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    FlowSection(title: "来源与时效") {
+                        if let modified = artifact.lastModified {
+                            bullet("最近改动：\(modified.formatted(date: .abbreviated, time: .shortened))")
+                        }
+                        bullet("判定基于本次扫描的只读结果；移走之前还会再复查一次。")
+                    }
                 }
             }
-            .padding(16)
-            .frame(width: 400, alignment: .leading)
+            .frame(maxHeight: 420)
+
+            HStack(spacing: 10) {
+                Spacer()
+                Button(copied ? "已复制" : "复制完整路径") {
+                    model.copy(artifact.path)
+                    copied = true
+                }
+                .buttonStyle(.acmSecondary)
+                Button("返回清单") { dismiss() }
+                    .buttonStyle(.acmPrimary)
+                    .keyboardShortcut(.defaultAction)
+            }
         }
-        .frame(maxHeight: 460)
+        .padding(24)
+        .frame(width: UI.flowWidth)
+        .background(Color.surfaceRaised)
     }
 
-    private func strengthName(_ strength: Strength) -> String {
-        switch strength {
-        case .certain: return "确定"
-        case .probable: return "推测"
-        case .speculative: return "存疑"
+    private var tier: Tier { Tier(artifact.strength) }
+
+    private func bullet(_ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Circle()
+                .fill(Color.textTertiary)
+                .frame(width: 4, height: 4)
+                .offset(y: -2)
+            Text(text)
+                .font(.acmCallout)
+                .foregroundStyle(Color.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var sizeText: String? {
+        guard let size = artifact.size else { return nil }
+        return size.accurate ? size.display : "≥ \(size.display)"
+    }
+
+    private var pathFacts: String {
+        var parts = [artifact.kind.displayName]
+        parts.append(artifact.isSymlink ? "软链接" : artifact.isDirectory ? "目录" : "文件")
+        if let size = artifact.size, !size.accurate { parts.append("有读不到的子目录，大小只是下界") }
+        return parts.joined(separator: " · ")
+    }
+
+    private var boundaryIsCaution: Bool {
+        artifact.strength != .certain || artifact.foreignChildren.contains { $0.blocksRemoval }
+    }
+
+    private var boundaries: [String] {
+        var lines: [String] = []
+        switch artifact.strength {
+        case .certain:
+            lines.append("归属是确定的，但确定归属不等于同意删除；要不要移走仍由你决定。")
+        case .probable:
+            lines.append("只有线索，没有足够的归属依据。这些证据只供你判断，不会据此默认勾选。")
+        case .speculative:
+            lines.append("没有可靠证据能说明它属于谁，请自己判断。")
+        }
+        if artifact.flags.contains(.shared) {
+            lines.append("\(artifact.ownerAppName ?? "桌面 App") 也在用这个位置，移走会影响它。")
+        }
+        if artifact.flags.contains(.credentials) {
+            lines.append("含 token 或密钥。移到废纸篓后仍可读取，也可能已进入 Time Machine。")
+        }
+        if let note = artifact.note { lines.append(note) }
+        return lines
+    }
+
+    private var policy: (symbol: String, text: String) {
+        if group.section == .managedByApp {
+            return ("lock", "由桌面 App 使用，不在管理范围内，这里只作说明。")
+        }
+        if !model.canSelect(artifact, in: group) {
+            return ("lock", "受保护，不能勾选" + (artifact.notRemovableReason.map { "：\($0)" } ?? "。"))
+        }
+        if artifact.flags.contains(.credentials) {
+            return ("key", "登录凭据既不默认勾选，也不参与全选；只有你逐条勾选才会进入计划。")
+        }
+        if artifact.defaultSelected {
+            return ("checkmark", "归属确定，且属于程序本体或可重建的内容，所以默认勾选；可以随时取消。")
+        }
+        if artifact.strength != .certain {
+            return ("minus", "归属不是「确定」档，默认不勾选。")
+        }
+        switch artifact.kind {
+        case .config, .data:
+            return ("minus", "配置与数据默认保留，需要你自己勾选。")
+        default:
+            return ("minus", "默认不勾选，需要你确认后自己勾选。")
         }
     }
 }
@@ -203,21 +305,26 @@ struct CommandLineView: View {
     let command: String
     var runnable = false
     @Environment(AppModel.self) private var model
+    @State private var copied = false
 
     var body: some View {
         HStack(spacing: 8) {
             Text(command)
-                .font(.system(.callout, design: .monospaced))
+                .font(.acmMonoPath)
+                .foregroundStyle(Color.textPrimary)
                 .textSelection(.enabled)
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Button("复制") { model.copy(command) }
-                .controlSize(.small)
-                .help("复制命令")
+            Button(copied ? "已复制" : "复制命令") {
+                model.copy(command)
+                copied = true
+            }
+            .buttonStyle(.acmCompact)
+            .help("复制命令")
             if runnable {
                 Button("在终端运行") { model.runInTerminal(command) }
-                    .controlSize(.small)
+                    .buttonStyle(.acmCompact)
                     .help("打开「终端」执行这条命令，本 App 自己不运行")
             }
         }
@@ -230,26 +337,57 @@ struct CommandLineView: View {
 /// 空状态、扫描中的占位。
 struct DetailPlaceholder: View {
     var scanning = false
+    @Environment(AppModel.self) private var model
 
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 10) {
             if scanning {
                 ProgressView()
                     .controlSize(.regular)
+                    .padding(.bottom, 4)
                 Text("正在扫描命令目录和家目录…")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .font(.acmBodyMed)
+                    .foregroundStyle(Color.textPrimary)
                 Text("只读取目录，不修改任何文件")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .font(.acmCaption)
+                    .foregroundStyle(Color.textSecondary)
+            } else if !model.search.isEmpty {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 24))
+                    .foregroundStyle(Color.textTertiary)
+                    .padding(.bottom, 4)
+                Text("没有匹配的工具或路径")
+                    .font(.acmTitle)
+                    .foregroundStyle(Color.textPrimary)
+                Text("换个关键词，或清空搜索查看全部。搜索不会改变任何勾选。")
+                    .font(.acmCallout)
+                    .foregroundStyle(Color.textSecondary)
+                Button("清空搜索") { model.search = "" }
+                    .buttonStyle(.acmSecondary)
+                    .padding(.top, 6)
             } else {
-                ContentUnavailableView(
-                    "没有发现 Agent CLI",
-                    systemImage: "terminal",
-                    description: Text("命令目录和家目录里都没有找到 Agent 工具或它们的残留。\n可以点右上角「安装新工具」看看支持哪些。")
-                )
+                Image(systemName: "terminal")
+                    .font(.system(size: 24))
+                    .foregroundStyle(Color.textTertiary)
+                    .padding(.bottom, 4)
+                Text("没有发现 Agent CLI")
+                    .font(.acmTitle)
+                    .foregroundStyle(Color.textPrimary)
+                Text("命令目录和家目录里都没有找到 Agent 工具或它们的残留。\n本次扫描只读取目录，没有修改任何文件。")
+                    .font(.acmCallout)
+                    .foregroundStyle(Color.textSecondary)
+                    .multilineTextAlignment(.center)
+                HStack(spacing: 10) {
+                    Button("重新扫描") { model.rescan() }
+                        .buttonStyle(.acmSecondary)
+                    Button("安装工具…") { model.showInstall = true }
+                        .buttonStyle(.acmPrimary)
+                }
+                .padding(.top, 6)
             }
         }
+        .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.surfaceBase)
     }
 }

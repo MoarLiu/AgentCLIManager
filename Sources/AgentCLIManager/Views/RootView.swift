@@ -21,6 +21,7 @@ struct RootView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 OperationStatusView()
             }
+            .background(Color.surfaceBase)
         }
         .toolbar {
             ToolbarItemGroup {
@@ -40,111 +41,319 @@ struct RootView: View {
                 Button {
                     model.showInstall = true
                 } label: {
-                    Label("安装新工具", systemImage: "plus")
+                    Text("安装工具…")
                 }
                 .help("从目录清单里挑一个工具安装")
             }
         }
-        .sheet(isPresented: Binding(
-            get: { model.plan != nil },
-            set: { if !$0 { model.plan = nil } }
-        )) {
-            if let plan = model.plan { ConfirmSheet(plan: plan) }
+        .sheet(item: Binding(
+            get: { presentedSheet },
+            set: { newValue in
+                guard newValue == nil else { return }
+                model.plan = nil
+                model.planConfirmationToken = nil
+                model.result = nil
+                model.showInstall = false
+                model.showRecovery = false
+            }
+        )) { sheet in
+            switch sheet {
+            case .confirm:
+                if let plan = model.plan {
+                    ConfirmSheet(plan: plan, preservedArtifacts: model.preservedTopLevelArtifacts(for: plan))
+                }
+            case .result:
+                if let result = model.result { ResultSheet(result: result) }
+            case .install:
+                InstallSheet()
+            case .evidence:
+                if let pair = snapshotEvidence {
+                    EvidenceView(artifact: pair.artifact, group: pair.group)
+                }
+            case .recovery:
+                RecoverySheet()
+            }
         }
-        .sheet(isPresented: Binding(
-            get: { model.result != nil },
-            set: { if !$0 { model.result = nil } }
-        )) {
-            if let result = model.result { ResultSheet(result: result) }
-        }
-        .sheet(isPresented: $model.showInstall) {
-            InstallSheet()
-        }
+    }
+
+    /// 三种主弹窗互斥，避免一个根视图同时挂多个 sheet 导致展示不确定。
+    private var presentedSheet: PresentedSheet? {
+        if model.plan != nil { return .confirm }
+        if model.result != nil { return .result }
+        if model.showInstall { return .install }
+        if model.showRecovery { return .recovery }
+        if model.snapshot?.sheet == "evidence", snapshotEvidence != nil { return .evidence }
+        return nil
+    }
+
+    private var snapshotEvidence: (artifact: Artifact, group: ToolGroup)? {
+        guard model.snapshot?.sheet == "evidence", let group = model.selectedGroup,
+              let artifact = group.artifacts.first(where: { $0.parentPath == nil }) else { return nil }
+        return (artifact, group)
+    }
+
+    private enum PresentedSheet: String, Identifiable {
+        case confirm, result, install, evidence, recovery
+        var id: String { rawValue }
     }
 }
 
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
-    @State private var collapsed: Set<ACMCore.Section> = [.otherCLI, .managedByApp]
+    @State private var collapsed: Set<ACMCore.Section> = SidebarView.defaultCollapsed
+    static var defaultCollapsed: Set<ACMCore.Section> {
+        guard let raw = SnapshotOptions.parse(CommandLine.arguments)?.expandSection,
+              let section = ACMCore.Section(rawValue: raw) else {
+            return [.otherCLI, .managedByApp]
+        }
+        var result: Set<ACMCore.Section> = [.otherCLI, .managedByApp]
+        result.remove(section)
+        return result
+    }
+    @FocusState private var focusedGroupID: ToolGroup.ID?
 
     var body: some View {
         @Bindable var model = model
-        List(selection: $model.selectedGroupID) {
-            ForEach(ACMCore.Section.allCases, id: \.self) { section in
-                let groups = model.groups(in: section)
-                if !groups.isEmpty {
-                    SwiftUI.Section(isExpanded: expansion(section)) {
-                        ForEach(groups) { group in
-                            GroupRow(group: group)
-                                .tag(group.id)
-                        }
-                    } header: {
-                        HStack(spacing: 5) {
-                            Text(section.displayName)
-                            Text("\(groups.count)")
-                                .foregroundStyle(.tertiary)
-                                .monospacedDigit()
+        let sections = ACMCore.Section.allCases.map { ($0, model.groups(in: $0)) }.filter { !$0.1.isEmpty }
+        let largest = sections.flatMap { $0.1 }.map { $0.totalSize?.bytes ?? 0 }.max() ?? 0
+
+        VStack(spacing: 0) {
+        SidebarSearchField(text: $model.search)
+            .padding(.horizontal, 12)
+            .padding(.top, 4)
+            .padding(.bottom, 6)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(sections, id: \.0) { section, groups in
+                        header(section, count: groups.count)
+                        if isExpanded(section) {
+                            ForEach(groups) { group in
+                                GroupRow(group: group, largest: largest, focusedGroupID: $focusedGroupID)
+                                    .id(group.id)
+                            }
                         }
                     }
+                    if sections.isEmpty, !model.search.isEmpty {
+                        Text("没有匹配的工具或路径")
+                            .font(.acmCaption)
+                            .foregroundStyle(Color.textSecondary)
+                            .padding(.horizontal, 8)
+                            .padding(.top, 12)
+                    }
                 }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
+            }
+            .onMoveCommand { direction in
+                let visible = sections.filter { isExpanded($0.0) }.flatMap { $0.1 }
+                guard !visible.isEmpty else { return }
+                let index = visible.firstIndex { $0.id == model.selectedGroupID }
+                let next: Int
+                switch direction {
+                case .down: next = min(visible.count - 1, (index ?? -1) + 1)
+                case .up: next = max(0, (index ?? 1) - 1)
+                default: return
+                }
+                model.selectedGroupID = visible[next].id
+                focusedGroupID = visible[next].id
+                proxy.scrollTo(visible[next].id)
             }
         }
-        .listStyle(.sidebar)
-        .searchable(text: $model.search, placement: .sidebar, prompt: "搜索工具或路径")
+        }
+        .background(Color.surfaceSidebar)
+        .onAppear {
+            // 初次打开就把键盘焦点放到当前工具，方向键不用先鼠标点一下。
+            if focusedGroupID == nil { focusedGroupID = model.selectedGroupID }
+        }
+        .onChange(of: model.search) { _, _ in
+            // 搜索可能让当前焦点行消失，把焦点交给仍然选中的可见行。
+            if let selected = model.selectedGroupID,
+               ACMCore.Section.allCases.flatMap({ model.groups(in: $0) }).contains(where: { $0.id == selected }) {
+                focusedGroupID = selected
+            }
+        }
+        .onChange(of: model.selectedGroupID) { _, newValue in
+            guard focusedGroupID != nil else { return }
+            focusedGroupID = newValue
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            DiskFooter()
+            VStack(spacing: 0) {
+                Hairline()
+                RecoverFooter { model.showRecovery = true }
+                DiskFooter()
+            }
+            .background(Color.surfaceSidebar)
         }
     }
 
-    private func expansion(_ section: ACMCore.Section) -> Binding<Bool> {
-        Binding(
-            // 搜索时全部展开，否则搜到了也看不见
-            get: { !model.search.isEmpty || !collapsed.contains(section) },
-            set: { expanded in
-                if expanded { collapsed.remove(section) } else { collapsed.insert(section) }
+    // 搜索时全部展开，否则搜到了也看不见
+    private func isExpanded(_ section: ACMCore.Section) -> Bool {
+        !model.search.isEmpty || !collapsed.contains(section)
+    }
+
+    private func header(_ section: ACMCore.Section, count: Int) -> some View {
+        let expanded = isExpanded(section)
+        return Button {
+            if collapsed.contains(section) { collapsed.remove(section) } else { collapsed.insert(section) }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: section.symbol)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.textSecondary)
+                    .frame(width: 14)
+                Text(section.displayName)
+                    .font(.acmCaptionMed)
+                    .foregroundStyle(Color.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("\(count)")
+                    .font(.acmCaption)
+                    .foregroundStyle(Color.textTertiary)
+                    .monospacedDigit()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(Color.textTertiary)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                    .opacity(expanded ? 0 : 1)
             }
-        )
+            .padding(.init(top: 10, leading: 8, bottom: 4, trailing: 8))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(section.explanation)
+        .accessibilityLabel("\(section.displayName)，\(count) 个")
+        .accessibilityHint(expanded ? "收起" : "展开")
     }
 }
 
-struct GroupRow: View {
-    let group: ToolGroup
-    @Environment(AppModel.self) private var model
+/// 侧栏顶部的搜索框：32 pt 高，raised 底色。⌘F 聚焦，Esc 清空。
+struct SidebarSearchField: View {
+    @Binding var text: String
+    @FocusState private var focused: Bool
 
     var body: some View {
         HStack(spacing: 8) {
-            ToolIcon(name: group.name, section: group.section, size: 26,
-                     selected: model.selectedGroupID == group.id)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    Text(group.name)
-                        .font(.callout)
-                        .lineLimit(1)
-                    if group.isRunning {
-                        Circle()
-                            .fill(.green)
-                            .frame(width: 5, height: 5)
-                            .help("正在运行")
-                            .accessibilityLabel("正在运行")
-                    }
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.textSecondary)
+            TextField("搜索工具或路径", text: $text)
+                .textFieldStyle(.plain)
+                .font(.acmCallout)
+                .foregroundStyle(Color.textPrimary)
+                .focused($focused)
+                .onExitCommand { text = ""; focused = false }
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.textTertiary)
                 }
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                .buttonStyle(.plain)
+                .accessibilityLabel("清空搜索")
             }
-            Spacer(minLength: 4)
-            Text(sizeText)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 44, alignment: .trailing)
-                .help(group.totalSize.map { "共 \($0.display)" } ?? "正在计算占用")
         }
-        .padding(.vertical, 3)
+        .padding(.horizontal, 8)
+        .frame(height: 32)
+        .background(Color.surfaceRaised, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(focused ? Color.lineControl : Color.lineHairline,
+                              lineWidth: focused ? 1 : UI.hairline)
+        }
+        .background {
+            // ⌘F 聚焦搜索框
+            Button("") { focused = true }
+                .keyboardShortcut("f", modifiers: .command)
+                .opacity(0)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+/// 侧栏行：徽标 + 名称 + 右对齐大小 + 占用条。选中用中性填充。
+struct GroupRow: View {
+    let group: ToolGroup
+    var largest: Int64 = 0
+    @Environment(AppModel.self) private var model
+    @State private var hovering = false
+    var focusedGroupID: FocusState<ToolGroup.ID?>.Binding
+
+    var body: some View {
+        let selected = model.selectedGroupID == group.id
+        Button {
+            focusedGroupID.wrappedValue = group.id
+            model.selectedGroupID = group.id
+            DispatchQueue.main.async { focusedGroupID.wrappedValue = group.id }
+        } label: {
+            HStack(spacing: 8) {
+                ToolIcon(name: group.name, section: group.section, size: 26, selected: selected,
+                             logo: ToolLogo.lookup(catalog: model.catalog, productID: group.productID,
+                                                   binaries: group.binaries.map(\.name),
+                                                   ownerApps: group.ownerApps))
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text(group.name)
+                            .font(.acmBodyMed)
+                            .foregroundStyle(Color.textPrimary)
+                            .lineLimit(1)
+                        if group.isRunning {
+                            Circle()
+                                .fill(Color.acmCaution)
+                                .frame(width: 5, height: 5)
+                                .help("正在运行")
+                                .accessibilityLabel("正在运行")
+                        }
+                        Spacer(minLength: 4)
+                        Text(sizeText)
+                            .font(.acmMonoPath)
+                            .foregroundStyle(Color.textSecondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    SizeBar(fraction: largest > 0 ? Double(group.totalSize?.bytes ?? 0) / Double(largest) : 0,
+                            width: nil)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(selected ? Color.fillSelected : hovering ? Color.rowHover : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 6))
+            .overlay {
+                if focusedGroupID.wrappedValue == group.id {
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Color.lineControl, lineWidth: 1)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .focusable(true)
+        .focused(focusedGroupID, equals: group.id)
+        .onChange(of: focusedGroupID.wrappedValue) { _, newValue in
+            if newValue == group.id { model.selectedGroupID = group.id }
+        }
+        .onKeyPress(.downArrow) { move(1) }
+        .onKeyPress(.upArrow) { move(-1) }
+        .onHover { hovering = $0 }
+        .help(subtitle)
+        .accessibilityLabel("\(group.name)，\(subtitle)")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func move(_ delta: Int) -> KeyPress.Result {
+        let visible = ACMCore.Section.allCases.flatMap { model.groups(in: $0) }
+        guard let index = visible.firstIndex(where: { $0.id == group.id }) else { return .ignored }
+        let next = max(0, min(visible.count - 1, index + delta))
+        guard next != index else { return .handled }
+        model.selectedGroupID = visible[next].id
+        focusedGroupID.wrappedValue = visible[next].id
+        return .handled
     }
 
     private var sizeText: String {
-        guard let size = group.totalSize else { return model.isMeasuring ? "…" : "" }
+        guard let size = group.totalSize else { return model.isMeasuring ? "…" : "—" }
         return size.bytes == 0 ? "—" : size.display
     }
 
@@ -163,6 +372,37 @@ struct GroupRow: View {
     }
 }
 
+/// 全局恢复入口：不管选中哪个工具、扫描是否为空，都在侧栏底部。
+struct RecoverFooter: View {
+    var action: () -> Void
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let batches = model.undoBatchCount
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.uturn.backward")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(batches > 0 ? Color.acmRecover : Color.textTertiary)
+                    .frame(width: 14)
+                Text("可放回原处")
+                    .font(.acmCallout)
+                    .foregroundStyle(batches > 0 ? Color.textPrimary : Color.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(batches > 0 ? "\(batches) 批未恢复" : "暂无")
+                    .font(.acmCaption)
+                    .foregroundStyle(Color.textSecondary)
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 40)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(model.isBusy)
+        .help(batches > 0 ? "查看尚未放回的条目，在清空废纸篓之前都可以放回" : "移到废纸篓的条目会在这里留下回执")
+    }
+}
+
 /// 磁盘占用：一行数字 + 一条细条，配上「Agent CLI 占了多少」。
 /// 不再用两行小字加进度条挤在一起。
 struct DiskFooter: View {
@@ -170,34 +410,33 @@ struct DiskFooter: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Divider()
             if let report = model.report, let free = report.diskFreeBytes, let total = report.diskTotalBytes, total > 0 {
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text("磁盘可用")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.textSecondary)
                     Spacer(minLength: 4)
                     Text(format(free))
                         .monospacedDigit()
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(Color.textPrimary)
                 }
                 DiskUsageBar(free: free, total: total)
                 Text("共 \(format(total))")
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Color.textTertiary)
             }
             if let footprint = model.managedFootprint {
                 HStack(spacing: 5) {
                     Image(systemName: "terminal")
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Color.textTertiary)
                     Text("Agent CLI 与残留占用 \(footprint.display)")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.textSecondary)
                         .lineLimit(1)
                 }
             }
         }
-        .font(.caption)
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
+        .font(.acmCaption)
+        .padding(.horizontal, 14)
+        .padding(.top, 2)
         .padding(.bottom, 12)
     }
 
@@ -217,15 +456,15 @@ struct DiskUsageBar: View {
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.barTrack)
                 Capsule()
-                    .fill(tint.opacity(0.8))
+                    .fill(tint)
                     .frame(width: max(3, geo.size.width * CGFloat(usedFraction)))
             }
         }
-        .frame(height: 5)
+        .frame(height: 2)
         .help("已用 \(ByteCountFormatter.string(fromByteCount: total - free, countStyle: .file))，可用 \(ByteCountFormatter.string(fromByteCount: free, countStyle: .file))")
     }
 
     private var tint: Color {
-        Double(free) / Double(total) < 0.12 ? .red : .secondary
+        Double(free) / Double(total) < 0.12 ? .acmDanger : .textSecondary
     }
 }
