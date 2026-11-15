@@ -385,7 +385,7 @@ struct InstallSheet: View {
             }
 
             HStack(spacing: 10) {
-                Text("点「在终端运行」会打开「终端」，由你自己执行。")
+                Text("点命令旁的「运行」会打开「终端」，由你自己执行。")
                     .font(.acmCaption)
                     .foregroundStyle(Color.textSecondary)
                     .lineLimit(1)

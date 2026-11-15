@@ -3,7 +3,6 @@ import AppKit
 import SwiftUI
 
 /// 界面的节奏都收在这里，保证各处的间距、圆角、配色一致。
-/// 数值与 design/tokens.json 一一对应。
 enum UI {
     static let gutter: CGFloat = 20        // 详情页左右留白
     static let sectionGap: CGFloat = 22    // 大区块之间
@@ -54,7 +53,7 @@ extension Color {
 
     static let textPrimary = dynamicColor(light: (0x1D1D1F, 1), dark: (0xF2F2F7, 1))
     static let textSecondary = dynamicColor(light: (0x6E6E73, 1), dark: (0xA0A0A6, 1))
-    static let textTertiary = dynamicColor(light: (0xA1A1A6, 1), dark: (0x6C6C72, 1))
+    static let textTertiary = dynamicColor(light: (0x85858B, 1), dark: (0x8E8E95, 1))
     static let textInverse = dynamicColor(light: (0xFFFFFF, 1), dark: (0x1E1E20, 1))
 
     /// 确定归属 · 不等于同意删除
@@ -75,12 +74,12 @@ extension Font {
     static let acmBodyMed = Font.system(size: 13, weight: .medium)
     static let acmBody = Font.system(size: 13)
     static let acmCallout = Font.system(size: 12)
-    static let acmCaptionMed = Font.system(size: 11, weight: .medium)
-    static let acmCaption = Font.system(size: 11)
-    static let acmMicroMed = Font.system(size: 10, weight: .medium)
+    static let acmCaptionMed = Font.system(size: 12, weight: .medium)
+    static let acmCaption = Font.system(size: 12)
+    static let acmMicroMed = Font.system(size: 11, weight: .medium)
     static let acmMonoDisplay = Font.system(size: 22, design: .monospaced)
     static let acmMonoNum = Font.system(size: 12, design: .monospaced)
-    static let acmMonoPath = Font.system(size: 11, design: .monospaced)
+    static let acmMonoPath = Font.system(size: 12, design: .monospaced)
 }
 
 // MARK: - 归属档位
@@ -444,38 +443,47 @@ struct ToolIcon: View {
     var logo: NSImage?
 
     var body: some View {
-        if let logo {
-            if section == .managedByApp {
-                // macOS App 图标有自己的形状、阴影和透明边距，不再套圆角底板。
-                Image(nsImage: logo)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: size, height: size)
-                    .accessibilityHidden(true)
+        Group {
+            if let logo {
+                if section == .managedByApp {
+                    // macOS App 图标有自己的形状、阴影和透明边距，不再套圆角底板。
+                    Image(nsImage: logo)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: visualSize, height: visualSize)
+                        .accessibilityHidden(true)
+                } else {
+                    Image(nsImage: logo)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: visualSize, height: visualSize)
+                        .clipShape(RoundedRectangle(cornerRadius: visualSize * 0.24))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: visualSize * 0.24)
+                                .strokeBorder(Color.lineHairline, lineWidth: UI.hairline)
+                        }
+                        .accessibilityHidden(true)
+                }
             } else {
-                Image(nsImage: logo)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: size, height: size)
-                    .clipShape(RoundedRectangle(cornerRadius: size * 0.24))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: size * 0.24)
-                            .strokeBorder(Color.lineHairline, lineWidth: UI.hairline)
-                    }
-                    .accessibilityHidden(true)
+                initialsTile
             }
-        } else {
-            initialsTile
         }
+        // 保持布局占位不变，只缩小 CLI 图标的视觉尺寸，避免整行文字随图标调整而移动。
+        .frame(width: size, height: size)
+    }
+
+    /// macOS App 图标自带透明边距；CLI 图标缩小到同样的视觉重量，而不是把 App 图标放大裁切。
+    private var visualSize: CGFloat {
+        section == .managedByApp ? size : size * 0.84
     }
 
     private var initialsTile: some View {
         Text(initials)
-            .font(.system(size: size * (initials.count > 1 ? 0.36 : 0.46), weight: .medium))
+            .font(.system(size: visualSize * (initials.count > 1 ? 0.36 : 0.46), weight: .medium))
             .foregroundStyle(selected ? Color.surfaceBase : Color.textPrimary)
-            .frame(width: size, height: size)
+            .frame(width: visualSize, height: visualSize)
             .background(selected ? Color.textPrimary : Color.toolIconFill,
-                        in: RoundedRectangle(cornerRadius: size * 0.24))
+                        in: RoundedRectangle(cornerRadius: visualSize * 0.24))
             .accessibilityHidden(true)
     }
 }
@@ -491,7 +499,7 @@ private extension ToolIcon {
     }
 }
 
-/// 占用大小的相对比例条：2pt 高、50% 透明度，只辅助大小数字，不编码风险或归属。
+/// 占用大小的相对比例条：3pt 高，能辅助比较但不编码风险或归属。
 struct SizeBar: View {
     /// 0…1
     var fraction: Double
@@ -502,12 +510,12 @@ struct SizeBar: View {
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.barTrack)
                 Capsule()
-                    .fill(Color.textPrimary.opacity(0.45))
+                    .fill(Color.textPrimary.opacity(0.55))
                     .frame(width: max(2, geo.size.width * CGFloat(min(1, max(0, fraction)))))
             }
         }
-        .frame(width: width, height: 2)
-        .opacity(0.5)
+        .frame(width: width, height: 3)
+        .opacity(0.75)
         .accessibilityHidden(true)
     }
 }

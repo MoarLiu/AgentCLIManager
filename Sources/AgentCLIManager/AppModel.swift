@@ -76,7 +76,7 @@ final class AppModel {
     var result: UninstallResult?
     private(set) var resultBatchID: UUID?
     var resultGroupName = ""
-    /// 撤销栏的数据来自账本；外部赋空等同于点「不用了」。
+    /// 撤销栏的数据来自账本；外部赋空等同于确认「丢弃恢复信息」。
     private var undoLedger = UndoLedger()
     var undoReceipts: [TrashReceipt] {
         get { undoLedger.receipts }

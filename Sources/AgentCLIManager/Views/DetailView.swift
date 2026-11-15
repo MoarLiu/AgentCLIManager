@@ -220,12 +220,12 @@ struct DetailView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(outer.isEmpty
                          ? "没有勾选任何条目"
-                         : "已选 \(outer.count) 项" + (swallowed > 0 ? "（连同里面的 \(swallowed) 个子项）" : ""))
+                         : "将移走 \(outer.count) 项" + (swallowed > 0 ? "（连同里面的 \(swallowed) 个子项）" : ""))
                         .font(.acmBodyMed)
                         .foregroundStyle(Color.textPrimary)
                         .lineLimit(1)
                     if let size = model.selectedSize(group), !outer.isEmpty {
-                        Text(size.accurate ? size.display : "≥ \(size.display)")
+                        Text("· " + (size.accurate ? size.display : "≥ \(size.display)"))
                             .font(.acmMonoNum)
                             .foregroundStyle(Color.textPrimary)
                     }
@@ -234,20 +234,22 @@ struct DetailView: View {
                               help: "含共用、凭据或归属不确定的条目，确认单里会逐条列出")
                     }
                 }
-                Text("默认保留配置、数据与凭据 · .ssh / .aws 全保护 · 只移废纸篓，不用 sudo")
-                    .font(.acmCaption)
+                Text("清空废纸篓后才释放空间 · 默认保留配置、数据与凭据 · 只移废纸篓，不用 sudo")
+                    .font(.acmCallout)
                     .foregroundStyle(Color.textSecondary)
-                    .lineLimit(1)
-                    .help("移到废纸篓不会立刻释放空间，清空后才释放；本 App 不会替你清空废纸篓")
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help("本 App 不会替你清空废纸篓；.ssh / .aws 全保护。勾选与确认都不会立即释放磁盘空间")
             }
             .layoutPriority(0)
             Spacer(minLength: 8)
             Menu {
                 Text("勾选和取消都不改文件，只有确认单执行后才移动")
                 Button("恢复默认勾选") { model.selectDefaults(group) }
-                Button(group.section == .installed ? "连同配置和数据（不含登录凭据）" : "全选（不含登录凭据）") {
+                Button("选择全部（不含登录凭据）") {
                     model.selectAll(group)
                 }
+                .help("选择所有可勾选条目，包含配置和数据；登录凭据只能单独勾选，受保护项始终排除")
                 Divider()
                 Button("全部取消") { model.selectNone(group) }
             } label: {
@@ -258,12 +260,12 @@ struct DetailView: View {
             .fixedSize()
             .help("批量调整勾选")
 
-            Button("核对变更…") {
+            Button("卸载") {
                 model.preparePlan(for: group)
             }
             .buttonStyle(.acmPrimary)
             .disabled(outer.isEmpty || model.isBusy || model.isScanning)
-            .help("先看确认单，再决定要不要移走")
+            .help("打开卸载确认单，核对后才会移走所选条目")
             .layoutPriority(1)
         }
         .padding(.horizontal, UI.gutter)
@@ -304,7 +306,7 @@ struct GroupHeader: View {
                         .font(.acmMonoDisplay)
                         .foregroundStyle(Color.textPrimary)
                         .lineLimit(1)
-                    Text("\(top.count) 项" + (partial > 0 ? " · \(partial) 项未量全" : ""))
+                    Text("关联占用 · \(top.count) 项" + (partial > 0 ? " · \(partial) 项未量全" : ""))
                         .font(.acmCaption)
                         .foregroundStyle(Color.textSecondary)
                 }
@@ -382,9 +384,10 @@ struct TierSummary: View {
                 TierTag(tier: tier, count: top.filter { Tier($0.strength) == tier }.count)
             }
             Text(policy)
-                .font(.acmCaption)
+                .font(.acmCallout)
                 .foregroundStyle(Color.textSecondary)
-                .lineLimit(2)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .multilineTextAlignment(.trailing)
         }
@@ -512,7 +515,7 @@ struct BinaryRow: View {
 
 // MARK: - 文件行
 
-/// 清单行：证据常驻第二行，不藏在悬停里。
+/// 清单行：默认只显示路径、归属档位和风险徽标；完整判据收进证据弹窗。
 struct ArtifactRow: View {
     let artifact: Artifact
     let group: ToolGroup
@@ -536,7 +539,7 @@ struct ArtifactRow: View {
                     model.setSelected(artifact, in: group, !model.isSelected(artifact, in: group))
                 }
                 .help(!selectable ? (artifact.notRemovableReason ?? "受保护，不能勾选")
-                      : implied ? "上级目录已勾选，这一项会被一并移走" : "勾选后进入「核对变更」的清单")
+                      : implied ? "上级目录已勾选，这一项会被一并移走" : "勾选后进入卸载确认清单")
             }
 
             if artifact.expandable && depth == 0 {
@@ -562,25 +565,16 @@ struct ArtifactRow: View {
                 .foregroundStyle(Color.textSecondary)
                 .frame(width: 18)
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(depth == 0 ? artifact.display(home: model.env.home) : PathUtil.lastComponent(artifact.path))
-                        .font(.acmMonoNum)
-                        .foregroundStyle(Color.textPrimary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(artifact.path)
-                        .layoutPriority(1)
-                    FlagBadges(artifact: artifact, section: group.section)
-                }
-                HStack(spacing: 6) {
-                    TierTag(tier: Tier(artifact.strength))
-                    Text(reason)
-                        .font(.acmCaption)
-                        .foregroundStyle(foreignBlocked ? Color.acmCaution : Color.textSecondary)
-                        .lineLimit(1)
-                        .help(reason)
-                }
+            HStack(spacing: 6) {
+                Text(depth == 0 ? artifact.display(home: model.env.home) : PathUtil.lastComponent(artifact.path))
+                    .font(.acmMonoNum)
+                    .foregroundStyle(Color.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(artifact.path)
+                    .layoutPriority(1)
+                TierTag(tier: Tier(artifact.strength))
+                FlagBadges(artifact: artifact, section: group.section)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .clipped()
@@ -652,28 +646,6 @@ struct ArtifactRow: View {
         if artifact.isDirectory { return "folder" }
         if artifact.kind == .credentials { return "key" }
         return "doc"
-    }
-
-    private var foreignBlocked: Bool {
-        artifact.foreignChildren.contains { $0.blocksRemoval }
-    }
-
-    /// 常驻的证据理由：先说里面属于别处的条目，再给最强的一条判据。
-    private var reason: String {
-        var parts: [String] = []
-        if let first = artifact.foreignChildren.first {
-            let name = PathUtil.lastComponent(first.path) + "/"
-            let rest = artifact.foreignChildren.count > 1 ? " 等 \(artifact.foreignChildren.count) 项" : ""
-            parts.append("内含 \(first.owner) 的 \(name)\(rest)"
-                         + (foreignBlocked ? "，整个目录不能移走；展开后可只清理其余子项" : "，移走外层会一并带走"))
-        }
-        if let evidence = artifact.evidence.max(by: { $0.strength < $1.strength }) ?? artifact.evidence.first {
-            parts.append("\(evidence.kind)：\(evidence.detail)")
-        } else {
-            parts.append(artifact.claim.displayName)
-        }
-        if let note = artifact.note { parts.append(note) }
-        return parts.joined(separator: " · ")
     }
 
     /// 只含软链的目录、悬空软链本身，占不了什么空间，显示「—」比「0 字节」清楚。

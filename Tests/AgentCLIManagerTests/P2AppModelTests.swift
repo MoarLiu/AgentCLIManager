@@ -274,6 +274,35 @@ import Testing
         #expect(!model.isSelected(credential, in: group))
     }
 
+    @Test func selectAllIncludesConfigurationAndDataButNotCredentialsOrProtectedItems() async throws {
+        let fixture = try GUIFixture()
+        let model = fixture.model()
+        let program = Artifact(path: fixture.home + "/.tool/bin", kind: .program,
+                               claim: .ownedByCLI, strength: .certain)
+        let config = Artifact(path: fixture.home + "/.tool/config.json", kind: .config,
+                              claim: .ownedByCLI, strength: .certain)
+        let data = Artifact(path: fixture.home + "/.tool/data", kind: .data,
+                            claim: .ownedByCLI, strength: .certain)
+        let credential = Artifact(path: fixture.home + "/.tool/token", kind: .credentials,
+                                  claim: .ownedByCLI, strength: .certain, flags: [.credentials])
+        let protected = Artifact(path: fixture.home + "/.ssh", kind: .config,
+                                 claim: .ownedByCLI, strength: .certain, flags: [.notRemovable])
+        var child = Artifact(path: fixture.home + "/.tool/data/old", kind: .data,
+                             claim: .ownedByCLI, strength: .certain)
+        child.parentPath = data.path
+        let group = ToolGroup(id: "select-all", name: "Select All", section: .installed,
+                              artifacts: [program, config, data, credential, protected, child])
+        model.report = ScanReport(scannedAt: Date(), groups: [group])
+        model.selectedGroupID = group.id
+
+        model.selectAll(group)
+
+        #expect(model.selection[group.id] == Set([program.path, config.path, data.path]))
+        #expect(!model.isSelected(credential, in: group))
+        #expect(!model.isSelected(protected, in: group))
+        #expect(!model.isSelected(child, in: group))
+    }
+
     @Test func confirmationBoundaryOnlyListsCompletelyUntouchedTopLevelPaths() async throws {
         let fixture = try GUIFixture()
         let model = fixture.model()

@@ -308,7 +308,7 @@ struct CommandLineView: View {
     @State private var copied = false
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             Text(command)
                 .font(.acmMonoPath)
                 .foregroundStyle(Color.textPrimary)
@@ -316,16 +316,24 @@ struct CommandLineView: View {
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Button(copied ? "已复制" : "复制命令") {
+            Button {
                 model.copy(command)
                 copied = true
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 12, weight: .medium))
             }
             .buttonStyle(.acmCompact)
+            .accessibilityLabel(copied ? "已复制" : "复制命令")
             .help("复制命令")
             if runnable {
-                Button("在终端运行") { model.runInTerminal(command) }
-                    .buttonStyle(.acmCompact)
-                    .help("打开「终端」执行这条命令，本 App 自己不运行")
+                Button {
+                    model.runInTerminal(command)
+                } label: {
+                    Label("运行", systemImage: "terminal")
+                }
+                .buttonStyle(.acmCompact)
+                .help("打开「终端」执行这条命令，本 App 自己不运行")
             }
         }
         .padding(.horizontal, 10)

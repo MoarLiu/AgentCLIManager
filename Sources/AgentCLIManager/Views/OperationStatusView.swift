@@ -85,10 +85,7 @@ struct OperationStatusView: View {
                 .buttonStyle(.acmCompact)
                 .disabled(!model.operationStatus.canUndoAll)
                 .help("恢复所有尚未放回的批次，包括之前操作留下的回执")
-                Button("不用了") { model.dismissUndo() }
-                    .buttonStyle(.acmCompact)
-                    .disabled(model.isBusy)
-                    .help("丢掉全部回执，条目留在废纸篓里")
+                DiscardRecoveryButton(compact: true)
             }
         }
         .padding(.horizontal, UI.gutter)
@@ -96,6 +93,31 @@ struct OperationStatusView: View {
         .background(Color.acmRecover.opacity(0.08))
         .overlay(alignment: .top) { Hairline() }
         .accessibilityElement(children: .contain)
+    }
+}
+
+/// 丢弃回执是不可通过本 App 逆转的界面操作，必须在独立确认之后再清除。
+struct DiscardRecoveryButton: View {
+    @Environment(AppModel.self) private var model
+    @State private var confirming = false
+    var compact = false
+    var onDiscard: () -> Void = {}
+
+    var body: some View {
+        Button("丢弃恢复信息…") { confirming = true }
+            .buttonStyle(compact ? .acmCompact : .acmSecondary)
+            .disabled(model.isBusy || model.undoReceipts.isEmpty)
+            .help("只丢弃本 App 的恢复信息，不移出或删除废纸篓里的条目；需要二次确认")
+            .accessibilityHint("确认后，条目仍留在废纸篓，但无法再通过本 App 自动放回原处")
+            .alert("丢弃全部恢复信息？", isPresented: $confirming) {
+                Button("取消", role: .cancel) {}
+                Button("丢弃恢复信息", role: .destructive) {
+                    model.dismissUndo()
+                    onDiscard()
+                }
+            } message: {
+                Text("条目仍留在废纸篓，但之后将无法通过本 App 自动放回原处。此操作不会清空废纸篓。")
+            }
     }
 }
 
@@ -179,13 +201,7 @@ struct RecoverySheet: View {
                 }
                 Spacer()
                 if !receipts.isEmpty {
-                    Button("不用了") {
-                        model.dismissUndo()
-                        dismiss()
-                    }
-                    .buttonStyle(.acmSecondary)
-                    .disabled(model.isBusy)
-                    .help("只丢弃本 App 的恢复信息，不移出或删除废纸篓里的条目")
+                    DiscardRecoveryButton { dismiss() }
                 }
                 Button("关闭") { dismiss() }
                     .buttonStyle(.acmSecondary)
