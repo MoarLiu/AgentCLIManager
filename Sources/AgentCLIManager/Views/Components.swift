@@ -283,7 +283,7 @@ struct EvidenceView: View {
             return ("lock", "受保护，不能勾选" + (artifact.notRemovableReason.map { "：\($0)" } ?? "。"))
         }
         if artifact.flags.contains(.credentials) {
-            return ("key", "登录凭据既不默认勾选，也不参与全选；只有你逐条勾选才会进入计划。")
+            return ("key", "登录凭据默认保留，批量选择会跳过独立凭据。逐条勾选凭据或选中包含它的上级目录时，确认单会提示风险。")
         }
         if artifact.defaultSelected {
             return ("checkmark", "归属确定，且属于程序本体或可重建的内容，所以默认勾选；可以随时取消。")

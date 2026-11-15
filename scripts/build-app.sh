@@ -12,8 +12,8 @@ cd "$(dirname "$0")/.."
 APP_NAME="Agent CLI Manager"
 EXECUTABLE="AgentCLIManager"
 BUNDLE_ID="dev.agentclimanager.AgentCLIManager"
-VERSION="0.1.0"
-BUILD="1"
+VERSION="0.2.0"
+BUILD="2"
 CONFIG="${CONFIG:-release}"
 SCRATCH_PATH="${SCRATCH_PATH:-.build}"
 
@@ -59,6 +59,7 @@ fi
 if [ -d assets/tool-logos ]; then
     mkdir -p "$OUT/Contents/Resources/tool-logos"
     find assets/tool-logos -name '*.png' -exec cp {} "$OUT/Contents/Resources/tool-logos/" \;
+    cp assets/tool-logos/README.md assets/tool-logos/*-LICENSE.txt "$OUT/Contents/Resources/tool-logos/"
 fi
 
 cat > "$OUT/Contents/Info.plist" <<EOF

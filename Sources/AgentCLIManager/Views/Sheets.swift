@@ -106,7 +106,7 @@ struct ConfirmSheet: View {
                     }
 
                     FlowSection(title: "不会动 · 这是计划边界", tone: .acmConfirmed) {
-                        boundary("没有勾选的配置、数据与登录凭据保持原样")
+                        boundary("未勾选且未被所选目录包含的配置、数据与登录凭据会保留")
                         boundary(".ssh / .aws 等全保护路径，任何情况下都不会进入计划")
                         boundary("不调用包管理器，不清空废纸篓")
                         if !preservedArtifacts.isEmpty {

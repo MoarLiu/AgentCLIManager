@@ -327,6 +327,50 @@ import Testing
         #expect(model.planConfirmationToken != first)
     }
 
+    @Test func sidebarNavigationSkipsCollapsedGroupsAndIncludesSearchResults() throws {
+        let fixture = try GUIFixture()
+        let model = fixture.model()
+        let installed = ToolGroup(id: "installed", name: "Installed", section: .installed)
+        let other = ToolGroup(id: "other", name: "Other", section: .otherCLI)
+        let app = ToolGroup(id: "app", name: "App", section: .managedByApp)
+        model.report = ScanReport(scannedAt: Date(), groups: [installed, other, app])
+        model.selectedGroupID = installed.id
+        let collapsed: Set<ACMCore.Section> = [.otherCLI, .managedByApp]
+        #expect(SidebarView.adjacentGroupID(in: model, collapsed: collapsed, direction: 1) == installed.id)
+        #expect(SidebarView.adjacentGroupID(in: model, collapsed: [], direction: 1) == other.id)
+        model.selectedGroupID = app.id
+        #expect(SidebarView.adjacentGroupID(in: model, collapsed: collapsed, direction: -1) == installed.id)
+        model.search = "Other"
+        #expect(SidebarView.adjacentGroupID(in: model, collapsed: collapsed, direction: 1) == other.id)
+        model.search = "missing"
+        #expect(SidebarView.adjacentGroupID(in: model, collapsed: collapsed, direction: 1) == nil)
+    }
+
+    @Test func confirmationSheetTransitionsToResultWithoutDiscardingIt() async throws {
+        let fixture = try GUIFixture()
+        let model = fixture.model()
+        let plan = try fixture.plan(model: model)
+        _ = NSApplication.shared
+        let view = NSHostingView(rootView: RootView().environment(model))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        defer { window.close() }
+        window.orderFront(nil)
+        view.layoutSubtreeIfNeeded()
+        model.planConfirmationToken = plan.token
+        model.plan = plan
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(window.attachedSheet != nil)
+        await model.execute(plan)
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(model.plan == nil)
+        #expect(model.result?.receipts.count == 1)
+        #expect(model.canUndoResult)
+        #expect(window.attachedSheet != nil)
+    }
+
     @Test func searchDoesNotSilentlyChangeSelectionOrPlan() async throws {
         let fixture = try GUIFixture()
         let model = fixture.model()

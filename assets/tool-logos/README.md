@@ -4,6 +4,12 @@
 图标版权归各自厂商，这里仅用于在界面上标识这个工具本身，不作任何背书，也不改变授权。
 文件名与 catalog 里的产品 `id` 一致。没有对应文件的用首字母兜底。
 
+`copilot-cli.png` 由 Primer Octicons 的 `copilot-24.svg` 栅格化并添加白底与边距，
+其 MIT 版权与许可全文见 `copilot-cli-LICENSE.txt`。
+`goose.png` 由 Block goose 仓库的桌面图标缩放为 128×128，
+其 Apache-2.0 许可全文见 `goose-LICENSE.txt`。
+本说明与许可文本随 App 一并打包在 `Contents/Resources/tool-logos/`。
+
 取图方式：
 
 - 带不透明底板的原图：满尺寸绘制，底板用自身边缘色补齐成方形。

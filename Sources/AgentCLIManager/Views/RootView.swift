@@ -129,7 +129,9 @@ struct SidebarView: View {
                         header(section, count: groups.count)
                         if isExpanded(section) {
                             ForEach(groups) { group in
-                                GroupRow(group: group, largest: largest, focusedGroupID: $focusedGroupID)
+                                GroupRow(group: group, largest: largest, focusedGroupID: $focusedGroupID) { direction in
+                                    move(direction, proxy: proxy)
+                                }
                                     .id(group.id)
                             }
                         }
@@ -146,18 +148,11 @@ struct SidebarView: View {
                 .padding(.bottom, 8)
             }
             .onMoveCommand { direction in
-                let visible = sections.filter { isExpanded($0.0) }.flatMap { $0.1 }
-                guard !visible.isEmpty else { return }
-                let index = visible.firstIndex { $0.id == model.selectedGroupID }
-                let next: Int
                 switch direction {
-                case .down: next = min(visible.count - 1, (index ?? -1) + 1)
-                case .up: next = max(0, (index ?? 1) - 1)
+                case .down: move(1, proxy: proxy)
+                case .up: move(-1, proxy: proxy)
                 default: return
                 }
-                model.selectedGroupID = visible[next].id
-                focusedGroupID = visible[next].id
-                proxy.scrollTo(visible[next].id)
             }
         }
         }
@@ -185,6 +180,23 @@ struct SidebarView: View {
             }
             .background(Color.surfaceSidebar)
         }
+    }
+
+    static func adjacentGroupID(in model: AppModel, collapsed: Set<ACMCore.Section>, direction: Int) -> ToolGroup.ID? {
+        let visible = ACMCore.Section.allCases
+            .filter { !model.search.isEmpty || !collapsed.contains($0) }
+            .flatMap { model.groups(in: $0) }
+        guard !visible.isEmpty else { return nil }
+        let index = visible.firstIndex { $0.id == model.selectedGroupID }
+        let next = max(0, min(visible.count - 1, (index ?? (direction > 0 ? -1 : 1)) + direction))
+        return visible[next].id
+    }
+
+    private func move(_ direction: Int, proxy: ScrollViewProxy) {
+        guard let next = Self.adjacentGroupID(in: model, collapsed: collapsed, direction: direction) else { return }
+        model.selectedGroupID = next
+        focusedGroupID = next
+        proxy.scrollTo(next)
     }
 
     // 搜索时全部展开，否则搜到了也看不见
@@ -279,6 +291,7 @@ struct GroupRow: View {
     @Environment(AppModel.self) private var model
     @State private var hovering = false
     var focusedGroupID: FocusState<ToolGroup.ID?>.Binding
+    var onMove: (Int) -> Void
 
     var body: some View {
         let selected = model.selectedGroupID == group.id
@@ -334,22 +347,12 @@ struct GroupRow: View {
         .onChange(of: focusedGroupID.wrappedValue) { _, newValue in
             if newValue == group.id { model.selectedGroupID = group.id }
         }
-        .onKeyPress(.downArrow) { move(1) }
-        .onKeyPress(.upArrow) { move(-1) }
+        .onKeyPress(.downArrow) { onMove(1); return .handled }
+        .onKeyPress(.upArrow) { onMove(-1); return .handled }
         .onHover { hovering = $0 }
         .help(subtitle)
         .accessibilityLabel("\(group.name)，\(subtitle)")
         .accessibilityAddTraits(selected ? .isSelected : [])
-    }
-
-    private func move(_ delta: Int) -> KeyPress.Result {
-        let visible = ACMCore.Section.allCases.flatMap { model.groups(in: $0) }
-        guard let index = visible.firstIndex(where: { $0.id == group.id }) else { return .ignored }
-        let next = max(0, min(visible.count - 1, index + delta))
-        guard next != index else { return .handled }
-        model.selectedGroupID = visible[next].id
-        focusedGroupID.wrappedValue = visible[next].id
-        return .handled
     }
 
     private var sizeText: String {

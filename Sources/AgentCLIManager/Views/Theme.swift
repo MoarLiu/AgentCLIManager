@@ -417,13 +417,15 @@ enum ToolLogo {
         if let cached = cache[id] { return cached }
         if directory == nil {
             directory = Bundle.main.resourceURL?.appendingPathComponent("tool-logos", isDirectory: true)
-            // SwiftPM / 测试环境没有组装好的 bundle，退回源码里的 assets
+            #if DEBUG
+            // Debug 的 SwiftPM / 测试环境可读源码资源，发布版只读 App 内置资源。
             if directory == nil || !FileManager.default.fileExists(atPath: directory!.path) {
                 directory = URL(fileURLWithPath: #filePath)
                     .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
                     .deletingLastPathComponent()
                     .appendingPathComponent("assets/tool-logos", isDirectory: true)
             }
+            #endif
         }
         guard let url = directory?.appendingPathComponent(id + ".png") else { return nil }
         let image = FileManager.default.fileExists(atPath: url.path) ? NSImage(contentsOf: url) : nil
