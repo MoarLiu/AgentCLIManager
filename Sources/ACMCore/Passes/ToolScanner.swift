@@ -65,12 +65,19 @@ public enum ToolScanner {
     /// 哪些进程正在使用这些位置里的东西。
     ///
     /// 进程表里的路径是内核的写法（`/private/var/…`），所以每个位置同时按原样和
-    /// `realpath` 之后的写法各比一次，否则经过软链的位置永远对不上。
+    /// 真实路径各比一次。入口软链只解析父目录，保留入口本身的身份，避免重新把借来的
+    /// 共用调度程序算进来；属于该工具的链尾已经单独列在监测位置中。
     public static func runningPIDs(usingAnyOf roots: [String], in processes: [RunningProcess]) -> [Int32] {
         var variants = Set<String>()
         for root in roots where !root.isEmpty {
             variants.insert(PathUtil.standardize(root))
-            variants.insert(PathUtil.standardize(FileProbe.kernelPath(root)))
+            let canonical: String
+            if FileProbe.lstat(root)?.isSymlink == true {
+                canonical = FileProbe.kernelPath(PathUtil.parent(root)) + "/" + PathUtil.lastComponent(root)
+            } else {
+                canonical = FileProbe.kernelPath(root)
+            }
+            variants.insert(PathUtil.standardize(canonical))
         }
         let pids = processes.filter { p in variants.contains { p.uses($0) } }.map(\.pid)
         return Array(Set(pids)).sorted()

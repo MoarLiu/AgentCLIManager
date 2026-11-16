@@ -115,7 +115,8 @@ import Testing
         fx.file(".zshrc", "export PATH=\"$HOME/.local/share/mise/shims:$PATH\"\n")
         let shim = fx.link(".local/share/mise/shims/codex", to: mise)
         fx.link(".local/share/mise/shims/node", to: mise)
-        let dispatcher = RunningProcess(pid: 77, executable: mise, arguments: [mise, "watch"])
+        let dispatcherPath = FileProbe.kernelPath(mise)
+        let dispatcher = RunningProcess(pid: 77, executable: dispatcherPath, arguments: [dispatcherPath, "watch"])
         let report = scan(fx, processes: [dispatcher], catalog: Catalog.loadBuiltin())
 
         let own = try #require(find(report, mise))
@@ -135,6 +136,18 @@ import Testing
         // 入口自己被当作可执行文件或参数用到时，仍然算在跑。
         let viaShim = RunningProcess(pid: 78, executable: "/bin/sh", arguments: ["/bin/sh", shim])
         #expect(ToolScanner.runningPIDs(for: codex, in: [viaShim]) == [78])
+        let kernelShim = FileProbe.kernelPath(PathUtil.parent(shim)) + "/codex"
+        let viaKernelShim = RunningProcess(pid: 79, executable: "/bin/sh", arguments: ["/bin/sh", kernelShim])
+        #expect(ToolScanner.runningPIDs(for: codex, in: [viaKernelShim]) == [79])
+
+        let allowed = RecordingRemover()
+        let completed = Uninstaller.execute(plan, env: fx.env(), remover: allowed, processProbe: { [dispatcher] })
+        #expect(completed.succeeded)
+        #expect(allowed.trashed == [shim])
+        let blocked = RecordingRemover()
+        let paused = Uninstaller.execute(plan, env: fx.env(), remover: blocked, processProbe: { [viaKernelShim] })
+        #expect(paused.newlyRunningPIDs == [79])
+        #expect(blocked.trashed.isEmpty)
     }
 
     /// 同一个命令经两个入口（自己建的软链指向管理器的 shim）：还是一个组，两条入口都在里面。
