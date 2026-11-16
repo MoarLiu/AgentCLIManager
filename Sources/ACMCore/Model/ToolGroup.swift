@@ -84,6 +84,9 @@ public struct BinaryInfo: Codable, Sendable, Hashable {
     public var binDirSource: String
     /// 入口最终指向的不是可执行程序时，说明它是什么（「一个目录」等）
     public var invalidTarget: String? = nil
+    /// 链路里借来的那几环：别的名字的命令也经过它们（volta-shim、mise 这类共用启动器）。
+    /// 它们不是这个命令的东西——不列进它的条目，它们在跑也不等于这个命令在跑。
+    public var borrowedHops: [String]? = nil
 
     public var isBroken: Bool { isDangling || brokenShimTarget != nil || invalidTarget != nil }
 }
@@ -164,17 +167,21 @@ public struct ToolGroup: Codable, Sendable, Identifiable, Hashable {
 
     public var isRunning: Bool { !runningPIDs.isEmpty }
 
-    /// 可勾选、会被真正移走的条目。
-    public var removableArtifacts: [Artifact] {
-        artifacts.filter { !$0.flags.contains(.notRemovable) }
+    /// 这个组的程序和入口所在的位置。扫描时判断「正在使用」、执行前按实时进程表复查，
+    /// 看的都是这一批，所以只在这里算一次。借来的共用启动器不在内。
+    public var watchPaths: [String] {
+        var out: [String] = []
+        for binary in binaries where !binary.isBroken {
+            if let root = binary.payloadRoot { out.append(root) }
+            let borrowed = Set((binary.borrowedHops ?? []).map(PathUtil.key))
+            out += binary.chain.filter { !borrowed.contains(PathUtil.key($0)) }
+        }
+        out += artifacts.filter { $0.kind == .program }.map(\.path)
+        return out
     }
 
     /// 不被同组其他条目包含的条目。算总量时只数这些，否则 `~/.grok` 和
     /// `~/.grok/downloads` 会被重复计数。
-    public var outermostArtifacts: [Artifact] {
-        ToolGroup.outermost(artifacts)
-    }
-
     public static func outermost(_ items: [Artifact]) -> [Artifact] {
         items.filter { a in
             !items.contains { b in b.path != a.path && PathUtil.isStrictlyInside(a.path, b.path) }

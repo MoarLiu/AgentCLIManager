@@ -22,6 +22,8 @@ __pycache__/
 REVIEW-*.md
 *.xcuserstate
 xcuserdata/
+# Figma session state: file key, file URL, run and session ids
+design/figma-mcp-state.json
 
 # Credentials and signing material
 .env

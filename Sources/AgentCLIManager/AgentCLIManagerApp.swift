@@ -169,8 +169,7 @@ enum Snapshotter {
             TrashReceipt.self,
             from: Data("{\"original\":\"\(group.artifacts.first?.path ?? "/tmp/x")\",\"trashed\":\"/tmp/trash/x\"}".utf8)) {
             // 纯内存回执：undoLast 在截图模式下直接返回，不会真的碰废纸篓
-            model.undoReceipts = [receipt]
-            model.undoGroupName = group.name
+            model.showDemoUndo(receipts: [receipt], groupName: group.name)
             model.undoFailures = [SkippedItem(path: group.artifacts.first?.path ?? "/tmp/x", reason: "原位置已有同名条目")]
         }
         report.groups[index] = group

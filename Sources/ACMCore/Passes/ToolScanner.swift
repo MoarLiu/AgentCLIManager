@@ -59,13 +59,7 @@ public enum ToolScanner {
 
     /// 哪些进程正在使用这个工具的程序。执行卸载前会用它再查一遍。
     public static func runningPIDs(for group: ToolGroup, in processes: [RunningProcess]) -> [Int32] {
-        var roots: [String] = []
-        for b in group.binaries where !b.isBroken {
-            if let root = b.payloadRoot { roots.append(root) }
-            roots += b.chain
-        }
-        roots += group.artifacts.filter { $0.kind == .program }.map(\.path)
-        return runningPIDs(usingAnyOf: roots, in: processes)
+        runningPIDs(usingAnyOf: group.watchPaths, in: processes)
     }
 
     /// 哪些进程正在使用这些位置里的东西。
@@ -171,6 +165,9 @@ final class ScanBuilder {
     /// 名称键 → 由家目录里的条目推出来的组（残留、未识别）：名字本身来自目录，可以放宽匹配
     private var looseKeys: [String: String] = [:]
     private var binDirs: [BinDir] = []
+    /// 各命令的链路里，被两个以上不同名命令经过的那些环：volta-shim、mise 这类调度程序，
+    /// 以及通往它们的软链。只有没有自己程序目录的命令才算「借用」它们，见 `borrows`。
+    private var sharedHops: Set<String> = []
 
     private struct Bucket {
         var groupID: String
@@ -217,7 +214,18 @@ final class ScanBuilder {
         // 命令决定整桶是谁的——共享 shim 目录里往往同时有 node、npm 和 Agent CLI。
         var buckets: [Bucket] = []
         var bucketIndex: [String: Int] = [:]
-        for binary in binaries {
+        // 所有命令都要数，包括有自己程序目录的：`~/.local/bin/mise` 是个普通命令，
+        // 但它和指向它的那个 shim 是两个名字，哪怕 shim 只有一个。
+        var hopUsers: [String: Set<String>] = [:]
+        for binary in binaries where binary.invalidTarget == nil {
+            for hop in binary.chain {
+                hopUsers[PathUtil.key(hop), default: []].insert(PathUtil.nameKey(binary.name))
+            }
+        }
+        sharedHops = Set(hopUsers.filter { $0.value.count > 1 }.keys)
+        for var binary in binaries {
+            let borrowed = binary.chain.filter { borrows(binary, $0) }
+            if !borrowed.isEmpty { binary.borrowedHops = borrowed }
             let root = binary.payloadRoot ?? binary.finalTarget ?? binary.path
             let product = matchProduct([binary], root: root)
             let identity: String
@@ -225,7 +233,9 @@ final class ScanBuilder {
                 identity = "product:" + product.id
             } else if let root = binary.payloadRoot {
                 identity = "root:" + PathUtil.key(root)
-            } else if let target = binary.finalTarget {
+            } else if let target = ownTarget(binary) {
+                // 没有程序目录（工具管理器里的命令）时按它自己的最后一环认。不能一路走到
+                // 链尾：管理器的 shim 是所有命令共用的，按它合并会把 node、npm 并到一起。
                 identity = "target:" + PathUtil.key(target)
             } else {
                 identity = "entry:" + PathUtil.key(binary.path)
@@ -244,6 +254,9 @@ final class ScanBuilder {
             let product = bins.compactMap { matchProduct([$0], root: $0.payloadRoot ?? $0.finalTarget ?? $0.path) }.first
             let primary = bins.map(\.name).min { ($0.count, $0) < ($1.count, $1) } ?? "?"
             let working = bins.filter { !$0.isBroken }
+            // 「其他命令」的组 id 和成组身份落在同一处，否则这里会把分开的桶再合并一次。
+            let otherID = "other:" + PathUtil.key(
+                bins.compactMap(\.payloadRoot).first ?? ownTarget(bins[0]) ?? bins[0].path)
 
             var notes: [String] = []
             let section: Section
@@ -275,7 +288,7 @@ final class ScanBuilder {
                 }
             } else if working.allSatisfy({ $0.channel == .appProvided }) {
                 section = .otherCLI
-                id = "other:" + PathUtil.key(root)
+                id = otherID
                 notes.append("随桌面 App 提供的命令，不单独管理")
             } else {
                 let markers = agentMarkers(root: root)
@@ -286,7 +299,7 @@ final class ScanBuilder {
                     notes.append("目录清单没有收录，按\(why)判断为 Agent 工具")
                 } else {
                     section = .otherCLI
-                    id = "other:" + PathUtil.key(root)
+                    id = otherID
                 }
             }
 
@@ -306,7 +319,9 @@ final class ScanBuilder {
                     section: section,
                     productID: product?.id,
                     binaries: bins,
-                    version: working.compactMap(\.version).first ?? versionFromFile(product),
+                    // 借共用调度程序启动的命令，链尾路径里的版本号是调度程序的。
+                    version: working.filter { bin in bin.finalTarget.map { !borrows(bin, $0) } ?? true }
+                        .compactMap(\.version).first ?? versionFromFile(product),
                     channel: working.first?.channel ?? bins.first?.channel,
                     notes: notes,
                     docs: product?.docs,
@@ -471,10 +486,22 @@ final class ScanBuilder {
             guard let group = groups[bucket.groupID] else { continue }
             let claim: Claim = group.section == .residue ? .residue : .ownedByCLI
 
+            // 一组入口只说明一次，哪怕其中两条都经过同一个共用启动器。
+            var explained = false
             for bin in bucket.bins {
                 for (index, hop) in bin.chain.enumerated() {
                     guard FileProbe.lstat(hop) != nil else { continue }
                     let isLast = index == bin.chain.count - 1
+
+                    // 共用的调度程序（和通往它的软链）只归它自己那个入口；别的命令只是借它
+                    // 启动，把它列进来等于让卸载一个命令带走整条工具链。
+                    if borrows(bin, hop) {
+                        if !explained {
+                            explained = true
+                            groups[bucket.groupID]?.notes.append(borrowedNote(bucket.bins, hop))
+                        }
+                        continue
+                    }
 
                     if isLast, bin.finalTarget != nil, bin.brokenShimTarget == nil, bin.invalidTarget == nil {
                         // 末端：程序本体
@@ -507,6 +534,28 @@ final class ScanBuilder {
                 }
             }
         }
+    }
+
+    /// `hop` 是不是 `bin` 借来的：它在入口之后，而且别的名字的命令也从这里过。
+    private func borrows(_ bin: BinaryInfo, _ hop: String) -> Bool {
+        bin.payloadRoot == nil && bin.invalidTarget == nil
+            && PathUtil.key(hop) != PathUtil.key(bin.path) && sharedHops.contains(PathUtil.key(hop))
+    }
+
+    /// 这个命令自己的最后一环：从入口往下，走到别的名字也经过的那一环之前为止。
+    /// 不借用任何东西时就是链尾；链路悬空时没有。
+    private func ownTarget(_ bin: BinaryInfo) -> String? {
+        guard bin.finalTarget != nil else { return nil }
+        return bin.chain.last { !borrows(bin, $0) }
+    }
+
+    /// 只写查得到的事实：经哪个文件启动、入口在谁的目录里。「程序由谁管理」不写——
+    /// 入口所在目录说明不了这一点（`~/.cargo/bin/rustc` 归 rustup 管）。
+    private func borrowedNote(_ bins: [BinaryInfo], _ hop: String) -> String {
+        let manager = bins.lazy.compactMap { BinaryRegistry.toolManager(for: $0.path, home: self.env.home) }.first
+        let place = manager.map { "（入口在 \($0) 的目录里）" } ?? ""
+        return "\(bins[0].name) 经共用的 \(show(hop)) 启动\(place)。这里只列它自己的入口；"
+            + "背后的程序不归这个入口所有，要彻底卸载请用安装它的那个工具"
     }
 
     /// 包管理器装的以整个包目录为单位；厂商安装器装的以最终那个文件为单位。

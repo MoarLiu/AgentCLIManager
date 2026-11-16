@@ -330,13 +330,7 @@ public enum UninstallPlanner {
             reclaimable: ToolGroup.totalSize(of: planned)
         )
         // 与 ToolScanner.runningPIDs(for:in:) 使用同一批位置，执行前按实时进程表重查。
-        var watchPaths: [String] = []
-        for binary in group.binaries where !binary.isBroken {
-            if let root = binary.payloadRoot { watchPaths.append(root) }
-            watchPaths += binary.chain
-        }
-        watchPaths += group.artifacts.filter { $0.kind == .program }.map(\.path)
-        result.watchPaths = unique(watchPaths)
+        result.watchPaths = unique(group.watchPaths)
         result.acknowledgedPIDs = Array(Set(group.runningPIDs)).sorted()
         return result
     }

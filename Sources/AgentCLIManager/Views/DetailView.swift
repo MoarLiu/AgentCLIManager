@@ -141,7 +141,7 @@ struct DetailView: View {
                 .font(.acmCaption)
                 .foregroundStyle(Color.textSecondary)
                 .fixedSize()
-            Text(sum.map { $0.bytes == 0 ? "—" : $0.accurate ? $0.display : "≥ \($0.display)" } ?? (model.isMeasuring ? "…" : "—"))
+            Text(sum.map { $0.bytes == 0 ? "—" : $0.display } ?? (model.isMeasuring ? "…" : "—"))
                 .font(.acmMonoNum)
                 .foregroundStyle((sum?.bytes ?? 0) == 0 ? Color.textTertiary : Color.textPrimary)
                 .lineLimit(1)
@@ -225,7 +225,7 @@ struct DetailView: View {
                         .foregroundStyle(Color.textPrimary)
                         .lineLimit(1)
                     if let size = model.selectedSize(group), !outer.isEmpty {
-                        Text("· " + (size.accurate ? size.display : "≥ \(size.display)"))
+                        Text("· " + size.display)
                             .font(.acmMonoNum)
                             .foregroundStyle(Color.textPrimary)
                     }
@@ -652,7 +652,7 @@ struct ArtifactRow: View {
     private var sizeText: String {
         guard let size = artifact.size else { return model.isMeasuring ? "…" : "—" }
         if size.bytes == 0, artifact.isDirectory || artifact.isSymlink { return "—" }
-        return size.accurate ? size.display : "≥ \(size.display)"
+        return size.display
     }
 
     private var sizeHelp: String {

@@ -35,7 +35,7 @@ struct OperationStatusView: View {
                 .foregroundStyle(Color.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
-            Button("知道了") { model.banner = nil }
+            Button(model.bannerNeedsRetry ? "重试保存" : "知道了") { model.acknowledgeBanner() }
                 .buttonStyle(.acmCompact)
         }
         .padding(.horizontal, UI.gutter)

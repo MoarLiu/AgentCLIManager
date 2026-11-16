@@ -241,7 +241,7 @@ struct EvidenceView: View {
 
     private var sizeText: String? {
         guard let size = artifact.size else { return nil }
-        return size.accurate ? size.display : "≥ \(size.display)"
+        return size.display
     }
 
     private var pathFacts: String {

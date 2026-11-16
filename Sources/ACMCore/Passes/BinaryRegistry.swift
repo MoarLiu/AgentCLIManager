@@ -38,9 +38,14 @@ public enum BinaryRegistry {
                 if invalid != nil && !known { continue }
 
                 let target = finalTarget ?? chain.last ?? path
-                let payload = invalid == nil
+                var payload = invalid == nil
                     ? resolvePayload(target: target, env: env)
                     : Payload(root: nil, channel: .unknown, version: nil, package: nil)
+                if invalid == nil, isManagerShim(entry: path, target: target, payload: payload, home: env.home) {
+                    // 版本号先留着：目标只有这一个命令在用时（Nix profile 那样）它就是这个命令的；
+                    // 多个命令共用时 ToolScanner 会把它当成调度程序的版本丢掉。
+                    payload = Payload(root: nil, channel: .standalone, version: payload.version, package: nil)
+                }
                 var broken: String?
                 var sign: CodeSignInfo?
                 if let finalTarget, invalid == nil {
@@ -290,6 +295,20 @@ public enum BinaryRegistry {
             return name
         }
         return nil
+    }
+
+    /// 入口本身放在工具管理器的目录里、指向别处，又没有被更具体的规则（npm/bun 全局包、
+    /// uv、pipx、厂商自己的目录）认出它自己的程序：按管理器的 shim 对待，它指向哪儿是管理器的事。
+    ///
+    /// `resolvePayload` 只看目标在哪，所以只拦得住「调度程序也在管理器目录里」的布局。
+    /// Homebrew 装的 Volta、装在 `~/.local/bin` 的 mise，shim 指向的是管理器目录之外的
+    /// 同一个文件：按它反推程序目录，会把所有命令并成一组，还把 `brew uninstall volta`
+    /// 记到每个命令头上（详情页里这条命令带「运行」按钮）。
+    static func isManagerShim(entry: String, target: String, payload: Payload, home: String) -> Bool {
+        guard payload.root != nil, PathUtil.key(entry) != PathUtil.key(target),
+              toolManager(for: entry, home: home) != nil
+        else { return false }
+        return ![Channel.npm, .pnpm, .bun, .uv, .pipx, .vendor, .appProvided].contains(payload.channel)
     }
 
     // MARK: - 载荷

@@ -160,8 +160,7 @@ import Testing
             loadLedger: { _ in loads += 1; return nil },
             saveLedger: { _, _ in saves += 1 }
         ))
-        model.undoReceipts = [fixture.receipt("demo")]
-        model.undoGroupName = "只读演示"
+        model.showDemoUndo(receipts: [fixture.receipt("demo")], groupName: "只读演示")
         model.result = UninstallResult(receipts: model.undoReceipts, failures: [])
         model.banner = "只读横幅"
         await model.undoLast()
@@ -238,6 +237,69 @@ import Testing
         #expect(model.undoFailures.count == 1)
         #expect(model.banner?.contains("没能保存撤销回执") == true)
         #expect(model.bannerIsError)
+    }
+
+    /// 「知道了」只能收起操作消息。回执没落盘这件事，要等真的保存成功才算了结。
+    @Test func acknowledgingBannerNeverHidesAnUnsavedLedger() async throws {
+        let fixture = try GUIFixture()
+        let receipt = TrashReceipt(original: fixture.home + "/.tool/failed", trashed: nil)
+        var failing = true
+        var saved: [UndoLedger] = []
+        let model = fixture.model(ledger: UndoLedger(receipts: [receipt], groupName: "失败工具"), save: { ledger, _ in
+            if failing { throw CocoaError(.fileWriteNoPermission) }
+            saved.append(ledger)
+        })
+        await model.undoLast()
+        #expect(model.banner?.contains("没能放回") == true)
+        #expect(model.bannerNeedsRetry)
+
+        // 给横幅赋 nil（「知道了」以前就是这么做的）不再连带清掉保存失败。
+        model.banner = nil
+        #expect(model.banner?.contains("没能放回") != true)
+        #expect(model.banner?.contains("没能保存撤销回执") == true)
+        #expect(model.bannerIsError)
+
+        // 按钮会重新保存一次；还是失败就继续留着。
+        model.acknowledgeBanner()
+        #expect(model.banner?.contains("没能保存撤销回执") == true)
+        #expect(model.bannerNeedsRetry)
+        #expect(saved.isEmpty)
+
+        // 保存成功后才消失，落盘的是内存里的那份账本。
+        failing = false
+        model.acknowledgeBanner()
+        #expect(model.banner == nil)
+        #expect(!model.bannerIsError)
+        #expect(!model.bannerNeedsRetry)
+        #expect(saved.map(\.receipts) == [[receipt]])
+    }
+
+    @Test func acknowledgingAnOrdinaryBannerJustDismissesIt() async throws {
+        let fixture = try GUIFixture()
+        var saves = 0
+        let model = fixture.model(save: { _, _ in saves += 1 })
+        model.banner = "没能打开终端：找不到「终端」"
+        model.bannerIsError = true
+        #expect(!model.bannerNeedsRetry)
+        model.acknowledgeBanner()
+        #expect(model.banner == nil)
+        #expect(!model.bannerIsError)
+        #expect(saves == 0, "没有保存失败时不该多写一次账本")
+    }
+
+    /// 账本只能经卸载和恢复改动。整体替换回执会把各批次压成一个新批次，
+    /// 结果弹窗的「只恢复本批次」就找不到自己那一批了。
+    @Test func demoUndoBarCannotReplaceARealLedger() async throws {
+        let fixture = try GUIFixture()
+        let first = fixture.receipt("first"), second = fixture.receipt("second")
+        var ledger = UndoLedger(receipts: [first], groupName: "old")
+        ledger.merge([second], groupName: "new")
+        var saves = 0
+        let model = fixture.model(ledger: ledger, save: { _, _ in saves += 1 })
+        model.showDemoUndo(receipts: [fixture.receipt("demo")], groupName: "只读演示")
+        #expect(model.undoReceipts == [first, second])
+        #expect(model.undoGroupName == "old、new")
+        #expect(saves == 0)
     }
 
     @Test func groupSelectionIncludesDescendantsButGroupActionOnlyTouchesTopLevel() async throws {

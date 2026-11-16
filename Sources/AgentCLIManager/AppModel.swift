@@ -76,23 +76,17 @@ final class AppModel {
     var result: UninstallResult?
     private(set) var resultBatchID: UUID?
     var resultGroupName = ""
-    /// 撤销栏的数据来自账本；外部赋空等同于确认「丢弃恢复信息」。
+    /// 撤销栏的数据来自账本，只读：批次由 `execute` 入账，由恢复和 `dismissUndo` 出账。
+    /// 这里不提供 setter——整体替换回执或改名都会把各批次压成一个新批次，
+    /// 结果弹窗的「只恢复本批次」就找不到自己那一批了。
     private var undoLedger = UndoLedger()
-    var undoReceipts: [TrashReceipt] {
-        get { undoLedger.receipts }
-        set {
-            if newValue.isEmpty {
-                dismissUndo()
-            } else {
-                undoLedger = UndoLedger(receipts: newValue, groupName: undoGroupName)
-                persistUndoLedger()
-            }
-        }
-    }
-    var undoGroupName: String {
-        get { undoLedger.groupName }
-        // 只读截图模式用它来展示一个假撤销栏；正式逻辑的名字由 UndoLedger 维护。
-        set { undoLedger = UndoLedger(receipts: undoReceipts, groupName: newValue) }
+    var undoReceipts: [TrashReceipt] { undoLedger.receipts }
+    var undoGroupName: String { undoLedger.groupName }
+
+    /// 只读截图模式用它摆一个假撤销栏。正式运行时不生效。
+    func showDemoUndo(receipts: [TrashReceipt], groupName: String) {
+        guard snapshot != nil else { return }
+        undoLedger = UndoLedger(receipts: receipts, groupName: groupName)
     }
     var showInstall = false
     var showRecovery = false
@@ -105,14 +99,21 @@ final class AppModel {
             let messages = [operationMessage, persistenceError].compactMap { $0 }
             return messages.isEmpty ? nil : messages.joined(separator: "\n")
         }
-        set {
-            operationMessage = newValue
-            if newValue == nil { persistenceError = nil }
-        }
+        // 赋值只管操作消息。保存失败说的是「回执还没落盘」，只有真的保存成功才消失。
+        set { operationMessage = newValue }
     }
     var bannerIsError: Bool {
         get { operationIsError || persistenceError != nil }
         set { operationIsError = newValue }
+    }
+    /// 横幅里有一条保存失败：按钮该是「重试保存」，不是「知道了」。
+    var bannerNeedsRetry: Bool { persistenceError != nil }
+
+    /// 横幅上的按钮。操作消息看过就收起；保存失败则重新保存一次，成功才消失。
+    func acknowledgeBanner() {
+        operationMessage = nil
+        operationIsError = false
+        if persistenceError != nil { persistUndoLedger() }
     }
     /// 正在放回原处
     var isUndoing = false
@@ -570,13 +571,7 @@ final class AppModel {
     private func makePlan(for group: ToolGroup, selected: Set<String>) -> UninstallPlan {
         var plan = UninstallPlanner.plan(group: group, selected: selected, env: env)
         // 目前规划器只负责列出步骤；这些字段由状态层填上，执行器才能做同样的复查。
-        var roots: [String] = []
-        for binary in group.binaries where !binary.isBroken {
-            if let root = binary.payloadRoot { roots.append(root) }
-            roots += binary.chain
-        }
-        roots += group.artifacts.filter { $0.kind == .program }.map(\.path)
-        plan.watchPaths = roots
+        plan.watchPaths = group.watchPaths
         plan.acknowledgedPIDs = group.runningPIDs
         return plan
     }
