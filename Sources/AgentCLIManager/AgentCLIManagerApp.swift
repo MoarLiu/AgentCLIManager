@@ -17,7 +17,7 @@ struct AgentCLIManagerApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .toolbar) {
-                Button("重新扫描") { model.rescan() }
+                Button("重新扫描") { model.rescanCurrent() }
                     .keyboardShortcut("r")
             }
         }
@@ -43,6 +43,10 @@ struct SnapshotOptions {
     var demo: String?
     /// 打印各组概况后照常截图，用来挑截图对象
     var listGroups = false
+    /// 只读截图：切到「项目清理」并扫描这个文件夹
+    var sweep: String?
+    /// 项目清理的闲置时间档位（小时）：24、168 或 0
+    var sweepIdle: String?
 
     static func parse(_ args: [String]) -> SnapshotOptions? {
         func value(_ flag: String) -> String? {
@@ -60,6 +64,8 @@ struct SnapshotOptions {
         options.size = value("--size")
         options.demo = value("--demo")
         options.listGroups = args.contains("--list-groups")
+        options.sweep = value("--sweep")
+        options.sweepIdle = value("--sweep-idle")
         return options
     }
 }
@@ -94,6 +100,16 @@ enum Snapshotter {
             }
         }
         applyDemo(options.demo, model: model)
+        if let folder = options.sweep {
+            model.workspace = .sweep
+            if let hours = options.sweepIdle.flatMap(Double.init), let idle = SweepIdle(rawValue: hours) {
+                model.sweep.setIdle(idle)
+            }
+            await model.sweep.showDemoFolder(folder)
+            if options.selectAll { model.sweep.selectAllCleanup() }
+            let demos = (options.demo ?? "").split(separator: ",").map(String.init)
+            if demos.contains("pending") { model.sweep.showDemoPending() }
+        }
         switch options.sheet {
         case "confirm":
             if let group = model.selectedGroup { model.preparePlan(for: group) }
@@ -101,6 +117,16 @@ enum Snapshotter {
             model.showInstall = true
         case "recovery":
             model.showRecovery = true
+        case "sweep-confirm":
+            await model.sweep.prepare(mode: .trash)
+        case "sweep-permanent":
+            await model.sweep.prepare(mode: .permanent)
+        case "sweep-result":
+            model.sweep.showDemoResult(mode: .trash)
+        case "sweep-result-permanent":
+            model.sweep.showDemoResult(mode: .permanent)
+        case "sweep-recovery":
+            model.sweep.showRecovery = true
         default:
             break
         }

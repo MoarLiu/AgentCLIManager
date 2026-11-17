@@ -158,7 +158,8 @@ import Testing
             measure: { _ in AsyncStream { $0.finish() } },
             remover: fixture.remover, processProbe: { [] },
             loadLedger: { _ in loads += 1; return nil },
-            saveLedger: { _, _ in saves += 1 }
+            saveLedger: { _, _ in saves += 1 },
+            sweep: .quiet
         ))
         model.showDemoUndo(receipts: [fixture.receipt("demo")], groupName: "只读演示")
         model.result = UninstallResult(receipts: model.undoReceipts, failures: [])
@@ -557,7 +558,8 @@ private final class GUIFixture: @unchecked Sendable {
             scan: scan ?? { _ in ScanReport(scannedAt: Date(), groups: []) },
             measure: measure,
             remover: remover, processProbe: { [] },
-            loadLedger: { _ in ledger }, saveLedger: save
+            loadLedger: { _ in ledger }, saveLedger: save,
+            sweep: .quiet
         ))
     }
     @MainActor func plan(model: AppModel, name: String = "current") throws -> UninstallPlan {
@@ -571,5 +573,16 @@ private final class GUIFixture: @unchecked Sendable {
         return UninstallPlan(groupID: group.id, groupName: group.name,
                              steps: [PlanStep(path: path, kind: .program, isDirectory: false)],
                              skipped: [], manualCommands: [], warnings: [], reclaimable: nil)
+    }
+}
+
+extension SweepDependencies {
+    /// 没有进程、没有 Git 跟踪，也不读写文件夹清单。
+    static var quiet: SweepDependencies {
+        SweepDependencies(
+            probes: SweepProbes(openPaths: { [] }, gitTracked: { _, _ in .untracked }),
+            loadFolders: { _ in [] },
+            saveFolders: { _, _ in }
+        )
     }
 }

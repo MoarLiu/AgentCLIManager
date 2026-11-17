@@ -12,7 +12,9 @@ struct RootView: View {
         } detail: {
             VStack(spacing: 0) {
                 Group {
-                    if let group = model.selectedGroup {
+                    if model.workspace == .sweep {
+                        SweepDetailView()
+                    } else if let group = model.selectedGroup {
                         DetailView(group: group)
                     } else {
                         DetailPlaceholder(scanning: model.isScanning)
@@ -25,25 +27,38 @@ struct RootView: View {
         }
         .toolbar {
             ToolbarItemGroup {
-                if model.isScanning || model.isMeasuring {
+                let sweeping = model.workspace == .sweep
+                if sweeping ? model.sweep.isScanningAny : (model.isScanning || model.isMeasuring) {
                     ProgressView()
                         .controlSize(.small)
-                        .help(model.isScanning ? "正在扫描" : "正在计算占用")
+                        .help(sweeping || model.isScanning ? "正在扫描" : "正在计算占用")
                 }
                 Button {
-                    model.rescan()
+                    model.rescanCurrent()
                 } label: {
                     Label("重新扫描", systemImage: "arrow.clockwise")
                 }
-                .disabled(model.isScanning)
-                .help("重新扫描（⌘R）")
+                .disabled(sweeping
+                          ? model.sweep.selectedFolder == nil || model.sweep.isScanning || model.sweep.isBusy
+                          : model.isScanning)
+                .help(sweeping ? "重新扫描这个文件夹（⌘R）" : "重新扫描（⌘R）")
 
-                Button {
-                    model.showInstall = true
-                } label: {
-                    Text("安装工具…")
+                if sweeping {
+                    Button {
+                        if let path = SweepFolderPicker.pick() { model.sweep.addFolder(path) }
+                    } label: {
+                        Text("添加文件夹…")
+                    }
+                    .disabled(model.snapshot != nil)
+                    .help("选一个放项目或下载文件的文件夹来清理")
+                } else {
+                    Button {
+                        model.showInstall = true
+                    } label: {
+                        Text("安装工具…")
+                    }
+                    .help("从目录清单里挑一个工具安装")
                 }
-                .help("从目录清单里挑一个工具安装")
             }
         }
         .sheet(item: Binding(
@@ -55,6 +70,9 @@ struct RootView: View {
                 model.result = nil
                 model.showInstall = false
                 model.showRecovery = false
+                model.sweep.cancelConfirmation()
+                model.sweep.result = nil
+                model.sweep.showRecovery = false
             }
         )) { sheet in
             switch sheet {
@@ -72,6 +90,15 @@ struct RootView: View {
                 }
             case .recovery:
                 RecoverySheet()
+            case .sweepConfirm:
+                if let confirmation = model.sweep.confirmation {
+                    SweepConfirmSheet(confirmation: confirmation)
+                        .id(confirmation.id)
+                }
+            case .sweepResult:
+                if let result = model.sweep.result { SweepResultSheet(result: result) }
+            case .sweepRecovery:
+                SweepRecoverySheet()
             }
         }
     }
@@ -82,6 +109,9 @@ struct RootView: View {
         if model.result != nil { return .result }
         if model.showInstall { return .install }
         if model.showRecovery { return .recovery }
+        if model.sweep.confirmation != nil { return .sweepConfirm }
+        if model.sweep.result != nil { return .sweepResult }
+        if model.sweep.showRecovery { return .sweepRecovery }
         if model.snapshot?.sheet == "evidence", snapshotEvidence != nil { return .evidence }
         return nil
     }
@@ -94,6 +124,7 @@ struct RootView: View {
 
     private enum PresentedSheet: String, Identifiable {
         case confirm, result, install, evidence, recovery
+        case sweepConfirm, sweepResult, sweepRecovery
         var id: String { rawValue }
     }
 }
@@ -118,9 +149,15 @@ struct SidebarView: View {
         let largest = sections.flatMap { $0.1 }.map { $0.totalSize?.bytes ?? 0 }.max() ?? 0
 
         VStack(spacing: 0) {
-        SidebarSearchField(text: $model.search)
+        WorkspaceSwitch()
             .padding(.horizontal, 12)
             .padding(.top, 4)
+            .padding(.bottom, 8)
+        if model.workspace == .sweep {
+            SweepFolderList()
+        } else {
+        SidebarSearchField(text: $model.search)
+            .padding(.horizontal, 12)
             .padding(.bottom, 6)
         ScrollViewReader { proxy in
             ScrollView {
@@ -156,6 +193,7 @@ struct SidebarView: View {
             }
         }
         }
+        }
         .background(Color.surfaceSidebar)
         .onAppear {
             // 初次打开就把键盘焦点放到当前工具，方向键不用先鼠标点一下。
@@ -175,7 +213,11 @@ struct SidebarView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 Hairline()
-                RecoverFooter { model.showRecovery = true }
+                if model.workspace == .sweep {
+                    SweepRecoverFooter()
+                } else {
+                    RecoverFooter { model.showRecovery = true }
+                }
                 DiskFooter()
             }
             .background(Color.surfaceSidebar)

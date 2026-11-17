@@ -8,7 +8,12 @@ public struct CLIArguments: Sendable {
     /// 用法错误（退出码 2）。
     public struct Error: Swift.Error, CustomStringConvertible, Equatable, Sendable {
         public var message: String
-        public init(_ message: String) { self.message = message }
+        /// 出错的是带 `--json` 的 `sweep` 调用：错误也要按 JSON 封装输出到 stdout。
+        public var sweepJSON: Bool
+        public init(_ message: String, sweepJSON: Bool = false) {
+            self.message = message
+            self.sweepJSON = sweepJSON
+        }
         public var description: String { message }
     }
 
@@ -21,6 +26,8 @@ public struct CLIArguments: Sendable {
         case undo(receipts: String)
         /// 列出目录清单认识的产品。
         case catalog(json: Bool)
+        /// 「项目清理」：扫描目录里的构建缓存、开发依赖和旧安装包。
+        case sweep(SweepArguments)
         /// 打印用法。
         case help
     }
@@ -41,6 +48,16 @@ public struct CLIArguments: Sendable {
     private static let valueOptionNames: Set<String> = ["--home", "--receipts"]
 
     public static func parse(_ arguments: [String]) throws -> CLIArguments {
+        // `sweep` 有自己的一套选项（可重复的 --exclude、带数值的 --limit…），交给它自己的解析器。
+        if let index = commandIndex(in: arguments), arguments[index] == "sweep" {
+            var rest = arguments
+            rest.remove(at: index)
+            guard let sweep = try SweepArguments.parse(rest) else {
+                return CLIArguments(command: .help, home: nil, noLibrary: false, noProcesses: false)
+            }
+            return CLIArguments(command: .sweep(sweep), home: sweep.home, noLibrary: false, noProcesses: false)
+        }
+
         var args = arguments
         var commandName: String?
         var positionals: [String] = []
@@ -136,5 +153,21 @@ public struct CLIArguments: Sendable {
             noLibrary: flag("--no-library"),
             noProcesses: flag("--no-processes")
         )
+    }
+
+    /// 子命令名在参数里的位置：第一个既不是选项、也不是带值选项的值的词。
+    private static func commandIndex(in arguments: [String]) -> Int? {
+        var index = 0
+        while index < arguments.count {
+            let arg = arguments[index]
+            if valueOptionNames.contains(arg) {
+                index += 2
+            } else if arg.hasPrefix("-") {
+                index += 1
+            } else {
+                return index
+            }
+        }
+        return nil
     }
 }

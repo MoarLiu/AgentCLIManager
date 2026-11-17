@@ -56,7 +56,8 @@ run() {
         [ "$previous" = "--home" ] && fake_home=$argument
         previous=$argument
     done
-    [ "$1" = "plan" ] || moving=0
+    # 会移动或删除东西的只有 plan 和 sweep（apply / restore）的 --execute，以及 undo。
+    case $1 in plan|sweep) ;; *) moving=0 ;; esac
     [ "$1" = "undo" ] && [ -n "$fake_home" ] && moving=1
     if [ "$moving" -eq 1 ]; then assert_fake_home "$fake_home"; fi
     OUT=$("$ACM" "$@" 2>&1)
@@ -427,6 +428,188 @@ else
     fail "undo 部分失败：只剩失败那条回执" "$(cat "$TMPROOT/partial.json")"
 fi
 [ -f "$PART_HOME/.local/bin/b" ] && pass "undo 部分失败：成功那条已放回" || fail "undo 部分失败：成功那条已放回"
+
+# ---------- sweep：项目清理（只读部分） ----------
+# 假家目录里的一个普通项目：有生成依据的 SwiftPM 缓存，外加新旧两个安装包。
+SWEEP_HOME="$TMPROOT/sweep-home"
+SWEEP_WS="$SWEEP_HOME/Projects/demo"
+mkdir -p "$SWEEP_WS/.build/artifacts" "$SWEEP_WS/release" "$SWEEP_WS/Sources"
+printf '// swift-tools-version: 6.0\n' > "$SWEEP_WS/Package.swift"
+printf '{}' > "$SWEEP_WS/.build/workspace-state.json"
+printf 'object' > "$SWEEP_WS/.build/object.o"
+printf 'print(42)\n' > "$SWEEP_WS/Sources/main.swift"
+printf 'old' > "$SWEEP_WS/release/Demo-1.0.0-arm64.dmg"
+printf 'new' > "$SWEEP_WS/release/Demo-1.1.0-arm64.dmg"
+SWEEP_PLAN="$TMPROOT/sweep-plan.json"
+sweep_json() {
+    printf '%s' "$OUT" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if ($1) else 1)" 2>/dev/null
+}
+
+run "sweep scan 默认闲置 24 小时" 0 sweep scan "$SWEEP_WS" --home "$SWEEP_HOME"
+expect_contains "sweep scan：刚建的缓存不算闲置" "可清理 0 项"
+run "sweep scan --idle-hours 0" 0 sweep scan "$SWEEP_WS" --home "$SWEEP_HOME" --idle-hours 0
+expect_contains "sweep scan：缓存和旧安装包可清理" "可清理 2 项"
+expect_contains "sweep scan：最新安装包保留" "保留 1 项"
+run "sweep scan --json --out" 0 sweep scan "$SWEEP_WS" --home "$SWEEP_HOME" --idle-hours 0 --json --out "$SWEEP_PLAN"
+sweep_json 'd["ok"] is True and d["schema_version"] == 1 and d["data"]["summary"]["cleanup"] == 2 and d["data"]["plan_file"].endswith("/sweep-plan.json")' \
+    && pass "sweep scan --json：封装与汇总" || fail "sweep scan --json：封装与汇总" "$OUT"
+[ -f "$SWEEP_PLAN" ] && pass "sweep scan --out：计划已保存" || fail "sweep scan --out：计划已保存"
+cp "$SWEEP_PLAN" "$TMPROOT/sweep-plan-before.json"
+run "sweep scan --out 不覆盖已有计划" 2 sweep scan "$SWEEP_WS" --home "$SWEEP_HOME" --out "$SWEEP_PLAN"
+cmp -s "$SWEEP_PLAN" "$TMPROOT/sweep-plan-before.json" && pass "sweep scan --out：原计划逐字保留" || fail "sweep scan --out：原计划逐字保留"
+(cd "$TMPROOT" && "$ACM" sweep scan "$SWEEP_WS" --home "$SWEEP_HOME" --out relative-plan.json > /dev/null 2>&1)
+[ -f "$TMPROOT/relative-plan.json" ] && pass "sweep scan --out：相对路径按当前目录" || fail "sweep scan --out：相对路径按当前目录"
+
+run "sweep items --status cleanup --json" 0 sweep items "$SWEEP_PLAN" --status cleanup --json --home "$SWEEP_HOME"
+sweep_json 'd["data"]["total"] == 2 and d["data"]["next_offset"] is None and {x["path"] for x in d["data"]["items"]} == {".build", "release/Demo-1.0.0-arm64.dmg"}' \
+    && pass "sweep items：只列可清理项" || fail "sweep items：只列可清理项" "$OUT"
+run "sweep items --limit 1 分页" 0 sweep items "$SWEEP_PLAN" --limit 1 --json --home "$SWEEP_HOME"
+sweep_json 'd["data"]["total"] == 3 and len(d["data"]["items"]) == 1 and d["data"]["next_offset"] == 1' \
+    && pass "sweep items：分页给出下一页位置" || fail "sweep items：分页给出下一页位置" "$OUT"
+run "sweep items --limit 0 退出码 2" 2 sweep items "$SWEEP_PLAN" --limit 0 --home "$SWEEP_HOME"
+run "sweep inspect 按相对路径" 0 sweep inspect "$SWEEP_PLAN" .build --home "$SWEEP_HOME"
+expect_contains "sweep inspect：显示指纹" "指纹"
+expect_contains "sweep inspect：显示类别" "swift_cache"
+run "sweep inspect 找不到 退出码 1" 1 sweep inspect "$SWEEP_PLAN" nosuchitem --home "$SWEEP_HOME"
+
+# 改过的计划不认。
+sed 's/"status" : "keep"/"status" : "cleanup"/' "$SWEEP_PLAN" > "$TMPROOT/sweep-tampered.json"
+cmp -s "$SWEEP_PLAN" "$TMPROOT/sweep-tampered.json" && fail "sweep 篡改用例：计划确实被改动" || pass "sweep 篡改用例：计划确实被改动"
+run "sweep items 拒绝改过的计划" 1 sweep items "$TMPROOT/sweep-tampered.json" --home "$SWEEP_HOME"
+expect_contains "sweep items：提示重新扫描" "重新扫描"
+run "sweep items 计划不存在 退出码 1" 1 sweep items "$TMPROOT/no-such-plan.json" --home "$SWEEP_HOME"
+
+# 扫描根的护栏。
+run "sweep scan 家目录本身 退出码 2" 2 sweep scan "$SWEEP_HOME" --home "$SWEEP_HOME"
+mkdir -p "$SWEEP_HOME/.hidden/project" "$TMPROOT/outside-home/project"
+run "sweep scan 家目录的隐藏目录 退出码 2" 2 sweep scan "$SWEEP_HOME/.hidden/project" --home "$SWEEP_HOME"
+expect_contains "sweep scan：隐藏目录归工具部分" "工具"
+run "sweep scan 假家目录之外 退出码 2" 2 sweep scan "$TMPROOT/outside-home/project" --home "$SWEEP_HOME"
+expect_contains "sweep scan：演练不出假家目录" "必须在该目录之内"
+run "sweep scan 目录不存在 退出码 2" 2 sweep scan "$SWEEP_HOME/Projects/missing" --home "$SWEEP_HOME"
+
+# 用法错误；带 --json 时错误也是一个 JSON 对象。
+run "sweep 缺子命令 退出码 2" 2 sweep
+run "sweep scan 缺目录 --json 退出码 2" 2 sweep scan --json
+sweep_json 'd["ok"] is False and d["error"]["code"] == "usage" and "details" in d["error"]' \
+    && pass "sweep 用法错误：JSON 封装" || fail "sweep 用法错误：JSON 封装" "$OUT"
+run "sweep scan --home 缺值 退出码 2" 2 sweep scan "$SWEEP_WS" --home
+run "sweep scan --idle-hours nan 退出码 2" 2 sweep scan "$SWEEP_WS" --home "$SWEEP_HOME" --idle-hours nan
+run "sweep scan 不认识 --execute 退出码 2" 2 sweep scan "$SWEEP_WS" --home "$SWEEP_HOME" --execute
+run "sweep apply 缺计划文件 退出码 2" 2 sweep apply --home "$SWEEP_HOME"
+run "sweep restore 不认识 --permanent 退出码 2" 2 sweep restore "$TMPROOT/none.jsonl" --permanent --home "$SWEEP_HOME"
+run "sweep apply --id 与 --include-old-versions 互斥 退出码 2" 2 \
+    sweep apply "$SWEEP_PLAN" --id abc --include-old-versions --home "$SWEEP_HOME"
+run "sweep --help 退出码 0" 0 sweep --help
+expect_contains "sweep --help 打印用法" "acm sweep scan"
+
+# 预演（不带 --execute 的 apply）同样什么都不动。
+run "sweep apply 预演 退出码 0" 0 sweep apply "$SWEEP_PLAN" --home "$SWEEP_HOME"
+expect_contains "sweep apply 预演：说明是预演" "预演"
+expect_contains "sweep apply 预演：默认进废纸篓" "移到废纸篓"
+expect_contains "sweep apply 预演：旧版本安装包不顺带清理" "旧版本安装包没有列入"
+run "sweep apply 预演 --permanent --json" 0 sweep apply "$SWEEP_PLAN" --permanent --json --home "$SWEEP_HOME"
+sweep_json 'd["ok"] is True and d["data"]["executed"] is False and d["data"]["mode"] == "permanent" and d["data"]["receipt"] is None and [x["status"] for x in d["data"]["items"]] == ["ready"] and len(d["data"]["unselected_ids"]) == 1' \
+    && pass "sweep apply 预演 --json：只列缓存，旧安装包另报" || fail "sweep apply 预演 --json：只列缓存，旧安装包另报" "$OUT"
+run "sweep apply --id 不在计划里 退出码 1" 1 sweep apply "$SWEEP_PLAN" --id 0000000000000000 --home "$SWEEP_HOME"
+SWEEP_KEEP_ID=$(python3 -c 'import json,sys; print(next(x["id"] for x in json.load(open(sys.argv[1]))["items"] if x["status"] == "keep"))' "$SWEEP_PLAN")
+run "sweep apply --id 点到保留项 退出码 1" 1 sweep apply "$SWEEP_PLAN" --id "$SWEEP_KEEP_ID" --execute --home "$SWEEP_HOME"
+expect_contains "sweep apply：保留项不能执行" "cleanup"
+
+# 以上全部是只读的：项目原样，假家目录里没有多出本工具的数据目录或废纸篓。
+[ -f "$SWEEP_WS/.build/object.o" ] && [ -f "$SWEEP_WS/release/Demo-1.0.0-arm64.dmg" ] && [ -f "$SWEEP_WS/Sources/main.swift" ] \
+    && pass "sweep：扫描后项目文件原样" || fail "sweep：扫描后项目文件原样"
+[ ! -e "$SWEEP_HOME/Library" ] && [ ! -e "$SWEEP_HOME/.Trash" ] && [ ! -e "$SWEEP_WS/.acm-sweep-staging" ] \
+    && pass "sweep：没有留下状态目录" || fail "sweep：没有留下状态目录" "$(ls -A "$SWEEP_HOME")"
+
+# ---------- sweep：执行与恢复 ----------
+# 所有 --execute 都带 --home <假家目录>：废纸篓、回执、执行锁全在 mktemp 根里。
+sweep_field() {
+    printf '%s' "$OUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print($1)" 2>/dev/null
+}
+
+# 废纸篓方式：缓存进假家目录的废纸篓，旧安装包没点名所以不动。
+run "sweep apply --execute（废纸篓）" 0 sweep apply "$SWEEP_PLAN" --execute --json --home "$SWEEP_HOME"
+sweep_json 'd["ok"] is True and d["data"]["executed"] is True and d["data"]["mode"] == "trash" and d["data"]["requires_emptying_trash"] is True and [x["status"] for x in d["data"]["items"]] == ["trashed"]' \
+    && pass "sweep apply：缓存已移入废纸篓" || fail "sweep apply：缓存已移入废纸篓" "$OUT"
+SWEEP_RECEIPT=$(sweep_field 'd["data"]["receipt"]')
+SWEEP_STAGED=$(sweep_field 'd["data"]["items"][0]["recovery_path"]')
+case $SWEEP_RECEIPT in
+    "$SWEEP_HOME/Library/Application Support/AgentCLIManager/sweep/runs/"*.jsonl) pass "sweep apply：回执在假家目录的数据目录里" ;;
+    *) fail "sweep apply：回执在假家目录的数据目录里" "$SWEEP_RECEIPT" ;;
+esac
+case $SWEEP_STAGED in
+    *"/sweep-home/.Trash/ACM-Sweep-"*) pass "sweep apply：暂存位置在假家目录的废纸篓里" ;;
+    *) fail "sweep apply：暂存位置在假家目录的废纸篓里" "$SWEEP_STAGED" ;;
+esac
+[ ! -e "$SWEEP_WS/.build" ] && [ -f "$SWEEP_STAGED/object.o" ] \
+    && pass "sweep apply：缓存离开项目、完整留在废纸篓" || fail "sweep apply：缓存离开项目、完整留在废纸篓"
+[ -f "$SWEEP_WS/Sources/main.swift" ] && [ -f "$SWEEP_WS/Package.swift" ] && [ -f "$SWEEP_WS/release/Demo-1.0.0-arm64.dmg" ] && [ -f "$SWEEP_WS/release/Demo-1.1.0-arm64.dmg" ] \
+    && pass "sweep apply：源码和两个安装包都没动" || fail "sweep apply：源码和两个安装包都没动"
+run "sweep apply 重复执行 退出码 0" 0 sweep apply "$SWEEP_PLAN" --execute --json --home "$SWEEP_HOME"
+sweep_json 'd["data"]["executed"] is False and [x["status"] for x in d["data"]["items"]] == ["already_absent"]' \
+    && pass "sweep apply 重复执行：已不存在，不再动手" || fail "sweep apply 重复执行：已不存在，不再动手" "$OUT"
+
+# 放回：先预演，再执行；重复放回不出错。
+run "sweep restore 预演 退出码 0" 0 sweep restore "$SWEEP_RECEIPT" --home "$SWEEP_HOME"
+expect_contains "sweep restore 预演：说明是预演" "预演"
+[ ! -e "$SWEEP_WS/.build" ] && pass "sweep restore 预演：没有放回" || fail "sweep restore 预演：没有放回"
+sed 's/"path":".build"/"path":"Sources\/injected"/' "$SWEEP_RECEIPT" > "$TMPROOT/sweep-receipt-tampered.jsonl"
+cmp -s "$SWEEP_RECEIPT" "$TMPROOT/sweep-receipt-tampered.jsonl" && fail "sweep 回执篡改用例：回执确实被改动" || pass "sweep 回执篡改用例：回执确实被改动"
+run "sweep restore 拒绝改过去向的回执" 1 sweep restore "$TMPROOT/sweep-receipt-tampered.jsonl" --execute --home "$SWEEP_HOME"
+[ ! -e "$SWEEP_WS/Sources/injected" ] && [ -f "$SWEEP_STAGED/object.o" ] \
+    && pass "sweep restore：改过的回执什么都没搬" || fail "sweep restore：改过的回执什么都没搬"
+run "sweep restore 回执不存在 退出码 1" 1 sweep restore "$TMPROOT/no-such-receipt.jsonl" --home "$SWEEP_HOME"
+run "sweep restore --execute" 0 sweep restore "$SWEEP_RECEIPT" --execute --home "$SWEEP_HOME"
+expect_contains "sweep restore：报告已放回" "已放回 1 项"
+[ -f "$SWEEP_WS/.build/object.o" ] && [ -f "$SWEEP_WS/.build/workspace-state.json" ] && [ ! -e "$SWEEP_STAGED" ] \
+    && pass "sweep restore：缓存回到原处" || fail "sweep restore：缓存回到原处"
+[ -d "$SWEEP_HOME/.Trash" ] && [ -z "$(ls -A "$SWEEP_HOME/.Trash")" ] \
+    && pass "sweep restore：废纸篓里的暂存目录已收掉" || fail "sweep restore：废纸篓里的暂存目录已收掉" "$(ls -A "$SWEEP_HOME/.Trash")"
+run "sweep restore 重复放回 退出码 0" 0 sweep restore "$SWEEP_RECEIPT" --execute --home "$SWEEP_HOME"
+expect_contains "sweep restore 重复放回：没有可放回的" "没有还能放回的内容"
+
+# 永久删除，连旧版本安装包一起：删掉的回不来，最新安装包和源码留着。
+run "sweep apply --execute --permanent --include-old-versions" 0 \
+    sweep apply "$SWEEP_PLAN" --execute --permanent --include-old-versions --json --home "$SWEEP_HOME"
+sweep_json 'd["ok"] is True and d["data"]["mode"] == "permanent" and sorted(x["status"] for x in d["data"]["items"]) == ["deleted", "deleted"] and d["data"]["unselected_ids"] == [] and d["data"]["requires_emptying_trash"] is False' \
+    && pass "sweep apply 永久：两项都已删除" || fail "sweep apply 永久：两项都已删除" "$OUT"
+SWEEP_PERMANENT_RECEIPT=$(sweep_field 'd["data"]["receipt"]')
+[ ! -e "$SWEEP_WS/.build" ] && [ ! -e "$SWEEP_WS/release/Demo-1.0.0-arm64.dmg" ] \
+    && pass "sweep apply 永久：缓存和旧安装包不在了" || fail "sweep apply 永久：缓存和旧安装包不在了"
+[ -f "$SWEEP_WS/release/Demo-1.1.0-arm64.dmg" ] && [ -f "$SWEEP_WS/Sources/main.swift" ] && [ -f "$SWEEP_WS/Package.swift" ] \
+    && pass "sweep apply 永久：最新安装包和源码原样" || fail "sweep apply 永久：最新安装包和源码原样"
+[ ! -e "$SWEEP_WS/.acm-sweep-staging" ] && [ -z "$(ls -A "$SWEEP_HOME/.Trash")" ] \
+    && pass "sweep apply 永久：没有留下暂存目录，也没进废纸篓" || fail "sweep apply 永久：没有留下暂存目录，也没进废纸篓"
+run "sweep restore 永久删除的回执 退出码 0" 0 sweep restore "$SWEEP_PERMANENT_RECEIPT" --execute --home "$SWEEP_HOME"
+expect_contains "sweep restore：删掉的没有可放回的" "没有还能放回的内容"
+
+# 计划生成之后内容变了：不动，退出码 1；--json 时仍给出逐项结果。
+SWEEP_WS2="$SWEEP_HOME/Projects/changed"
+mkdir -p "$SWEEP_WS2/.build/artifacts"
+printf '// swift-tools-version: 6.0\n' > "$SWEEP_WS2/Package.swift"
+printf '{}' > "$SWEEP_WS2/.build/workspace-state.json"
+printf 'object' > "$SWEEP_WS2/.build/object.o"
+run "sweep scan 第二个项目" 0 sweep scan "$SWEEP_WS2" --home "$SWEEP_HOME" --idle-hours 0 --out "$TMPROOT/sweep-plan2.json"
+printf 'rebuilt' > "$SWEEP_WS2/.build/object.o"
+run "sweep apply 内容已变 退出码 1" 1 sweep apply "$TMPROOT/sweep-plan2.json" --execute --permanent --home "$SWEEP_HOME"
+expect_contains "sweep apply 内容已变：标为已跳过" "已跳过"
+expect_contains "sweep apply 内容已变：说明什么都没动" "什么都没动"
+expect_not_contains "sweep apply 内容已变：不说成预演" "预演"
+run "sweep apply 内容已变 --json 退出码 1" 1 sweep apply "$TMPROOT/sweep-plan2.json" --execute --permanent --json --home "$SWEEP_HOME"
+sweep_json 'd["ok"] is False and d["error"]["code"] == "incomplete_operation" and d["data"]["executed"] is False and [x["status"] for x in d["data"]["items"]] == ["blocked"]' \
+    && pass "sweep apply 内容已变 --json：ok 为 false 且带逐项结果" || fail "sweep apply 内容已变 --json：ok 为 false 且带逐项结果" "$OUT"
+[ "$(cat "$SWEEP_WS2/.build/object.o")" = "rebuilt" ] && pass "sweep apply 内容已变：缓存原样" || fail "sweep apply 内容已变：缓存原样"
+
+# 演练的边界：别的家目录里生成的计划，在这个假家目录下不执行。
+SWEEP_OTHER_HOME="$TMPROOT/sweep-other-home"
+mkdir -p "$SWEEP_OTHER_HOME/project/.build/artifacts"
+printf '// swift-tools-version: 6.0\n' > "$SWEEP_OTHER_HOME/project/Package.swift"
+printf '{}' > "$SWEEP_OTHER_HOME/project/.build/workspace-state.json"
+run "sweep scan 另一个假家目录" 0 sweep scan "$SWEEP_OTHER_HOME/project" --home "$SWEEP_OTHER_HOME" --idle-hours 0 --out "$TMPROOT/sweep-plan-other.json"
+run "sweep apply 计划指向假家目录之外 退出码 2" 2 sweep apply "$TMPROOT/sweep-plan-other.json" --execute --permanent --home "$SWEEP_HOME"
+expect_contains "sweep apply：演练不出假家目录" "必须在该目录之内"
+[ -f "$SWEEP_OTHER_HOME/project/.build/workspace-state.json" ] && pass "sweep apply：假家目录之外的缓存原样" || fail "sweep apply：假家目录之外的缓存原样"
 
 # ---------- 汇总 ----------
 printf '\n通过 %d 条，失败 %d 条\n' "$PASS" "$FAIL"

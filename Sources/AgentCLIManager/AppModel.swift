@@ -14,6 +14,7 @@ struct AppDependencies {
     var processProbe: @Sendable () -> [RunningProcess]
     var loadLedger: (String) throws -> UndoLedger?
     var saveLedger: (UndoLedger, String) throws -> Void
+    var sweep: SweepDependencies
 
     static var live: AppDependencies {
         AppDependencies(
@@ -46,17 +47,29 @@ struct AppDependencies {
                     try FileManager.default.createDirectory(atPath: PathUtil.parent(path), withIntermediateDirectories: true)
                     try JSONEncoder().encode(ledger).write(to: URL(fileURLWithPath: path), options: .atomic)
                 }
-            }
+            },
+            sweep: .live
         )
     }
 }
 
-/// 界面状态。所有会动文件的操作都从这里发起，且只有「移到废纸篓」和「放回原处」两种。
+/// 窗口里的两块内容：管理 Agent CLI，或清理项目文件夹。
+enum Workspace: String {
+    case tools, sweep
+}
+
+/// 界面状态。「工具」这一块会动文件的操作都从这里发起，且只有「移到废纸篓」和「放回原处」两种；
+/// 「项目清理」的状态和操作在 `sweep` 里。
 @MainActor
 @Observable
 final class AppModel {
     private(set) var env: HostEnvironment
     private(set) var catalog: Catalog
+
+    var workspace: Workspace = .tools {
+        didSet { if workspace == .sweep { sweep.ensureScanned() } }
+    }
+    let sweep: SweepSession
 
     var report: ScanReport?
     var isScanning = false
@@ -156,7 +169,12 @@ final class AppModel {
         self.snapshot = snapshot
         self.dependencies = dependencies
         self.processProbe = dependencies.processProbe
+        self.sweep = SweepSession(env: env, dependencies: dependencies.sweep, readOnly: snapshot != nil)
         loadUndoLedger()
+        sweep.onMessage = { [weak self] text, isError in
+            self?.banner = text
+            self?.bannerIsError = isError
+        }
     }
 
     func start() async {
@@ -170,6 +188,11 @@ final class AppModel {
         Task { await scan() }
     }
 
+    /// 工具栏和 ⌘R：当前看的是哪一块，就重新扫描哪一块。
+    func rescanCurrent() {
+        if workspace == .sweep { sweep.rescan() } else { rescan() }
+    }
+
     func scan() async {
         isScanning = true
         generation += 1
@@ -179,6 +202,7 @@ final class AppModel {
         let catalog = dependencies.catalog(env)
         self.env = env
         self.catalog = catalog
+        sweep.env = env
         let options = ScanOptions(env: env, catalog: catalog, processProbe: processProbe)
         let scanned = await dependencies.scan(options)
         guard current == generation else { return }

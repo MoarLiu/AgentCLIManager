@@ -3,7 +3,8 @@ import Foundation
 
 // 开发、核对与卸载操作用的命令行。
 // scan / catalog / plan（演练）只读；undo 只把废纸篓里的东西放回原处。
-// plan 加上 --execute 才会把选中的条目移到废纸篓——绝不直接删除文件。
+// plan 加上 --execute 才会把选中的条目移到废纸篓——卸载绝不直接删除文件。
+// sweep apply / restore 同样默认只预演；唯一会直接删除文件的是 sweep apply --execute --permanent。
 
 let usage = """
 用法：
@@ -11,12 +12,23 @@ let usage = """
   acm plan <组 id 或名字> [--all] [--execute] [--receipts <文件>] [--no-processes] [--home <目录>]
   acm undo --receipts <文件> [--home <目录>]
   acm catalog [--json]
+  acm sweep scan <目录> [--out <文件>] [--idle-hours <小时>] [--max-entries <数量>]
+                 [--exclude <路径>]... [--json] [--home <目录>]
+  acm sweep items <计划文件> [--status cleanup|keep|review|blocked] [--limit <数量>]
+                 [--offset <数量>] [--json] [--home <目录>]
+  acm sweep inspect <计划文件> <id 或相对路径> [--json] [--home <目录>]
+  acm sweep apply <计划文件> [--id <id>]... [--include-old-versions] [--execute] [--permanent]
+                 [--json] [--home <目录>]
+  acm sweep restore <回执文件> [--execute] [--json] [--home <目录>]
   acm [<子命令>] --help | -h        打印本说明（退出码 0）；不带子命令等同于 scan
 
   scan    只读扫描，列出已装的 Agent CLI 及其关联文件
   plan    生成某个工具的卸载计划（默认只演练，--execute 才真的移到废纸篓）
   undo    把某次执行移走的东西放回原处（读取 --execute 写出的回执文件）
   catalog 列出目录清单里认识的产品（--json 输出合并后的完整清单）
+  sweep   项目清理：在指定目录里找闲置的构建缓存、开发依赖和旧安装包。
+          scan 扫描并下结论，items / inspect 查看已保存的计划（都只读）；
+          apply 按计划清理，restore 按回执放回（默认只预演，--execute 才动手）
 
 选项：
   --home <目录>      对着假家目录演练。必须是已存在的目录；不给值、值以 - 开头、
@@ -31,6 +43,31 @@ let usage = """
   --no-processes     不查进程表，也不做执行前的运行状态复查
   --no-library       scan 时不扫 ~/Library
   --json / --sizes / --verbose   scan 的输出形式；--json 也用于 catalog
+
+项目清理（sweep）：
+  scan 不移动、不删除任何东西。目录必须明确给出；家目录本身、家目录的隐藏目录、
+  ~/Library 和系统目录都不接受。候选项分四种：cleanup（有生成依据、闲置、没被占用）、
+  keep（最新版本的安装包）、review（证据不够或最近还在写）、blocked（有保护条件拦着）。
+  --out <文件>        把计划另存为新文件，供 items / inspect 查看；已有同名文件时拒绝
+  --idle-hours <小时> 至少闲置这么久才算 cleanup，默认 24；0 表示不看闲置时间
+  --max-entries <数量> 单个候选目录的条目上限，默认 500000，超过的不会判成 cleanup
+  --exclude <路径>    排除一个路径，可以给多次；候选目录里含有被排除的路径时整个跳过
+  --home <目录>       演练时扫描目录必须在这个假家目录之内
+  --json              stdout 只输出一个 JSON 对象：成功是 {"ok": true, "schema_version": 1,
+                      "data": …}，失败是 {"ok": false, …, "error": {"code", "message", "details"}}
+
+  apply 先重新扫描，逐项核对计划里的指纹、进程占用、Git 跟踪和保留的安装包；对不上的跳过。
+  计划超过 24 小时、扫描目录被换掉都要重新扫描。不带 --execute 只打印会做什么。
+  --execute           真的执行。默认移到废纸篓里本次执行的暂存目录（~/.Trash/ACM-Sweep-…），
+                      并在本 App 的数据目录里留下回执；清空废纸篓之后空间才会释放
+  --permanent         和 --execute 一起：直接删除，不可恢复，不经过废纸篓
+  --id <id>           只处理点名的项目，可以给多次；必须是计划里标为 cleanup 的
+  --include-old-versions  不点名时，连「已有更新版本」的旧安装包一起处理。默认不含它们：
+                      版本号取自文件名，新旧只是推测；内容相同的重复件不受此限
+  restore 按回执把还在暂存位置的内容放回原处：原位置已有东西时不覆盖，暂存内容变了不放回，
+  已经永久删除的放不回来。不带 --execute 只打印会做什么。
+  有任何一项被跳过或没走完时退出码 1；--json 时结果仍在 data 里，error.code 是
+  incomplete_operation。带 --home 演练时，计划和回执指向的目录必须在假家目录之内
 
 目标匹配（plan）：先按组 id 精确匹配，再按名字精确匹配（大小写不敏感），
 最后才按子串匹配。子串命中多个组会列出全部候选并退出（码 2），不会替你挑一个；
@@ -58,6 +95,10 @@ let parsed: CLIArguments
 do {
     parsed = try CLIArguments.parse(Array(CommandLine.arguments.dropFirst()))
 } catch let error as CLIArguments.Error {
+    if error.sweepJSON {
+        print(SweepOutput.json(SweepError("usage", error.message)))
+        exit(2)
+    }
     FileHandle.standardError.write(Data("错误：\(error.message)\n\n\(usage)\n".utf8))
     exit(2)
 } catch {
@@ -74,6 +115,10 @@ var env = HostEnvironment.live()
 if let home = parsed.home {
     var isDirectory: ObjCBool = false
     guard FileManager.default.fileExists(atPath: home, isDirectory: &isDirectory), isDirectory.boolValue else {
+        if case .sweep(let sweep) = parsed.command, sweep.json {
+            print(SweepOutput.json(SweepError("usage", "--home 必须是已存在的目录：\(home)")))
+            exit(2)
+        }
         fail("--home 必须是已存在的目录：\(home)", code: 2)
     }
     // 用于对着假家目录演练。
@@ -90,6 +135,11 @@ if let home = parsed.home {
     )
 }
 if parsed.noLibrary { env.includeLibrary = false }
+
+// 项目清理不用目录清单，也不扫工具，在这里就分出去。
+if case .sweep(let sweep) = parsed.command {
+    exit(runSweep(sweep, env: env))
+}
 
 let catalog = Catalog.loadAll(env: env)
 
@@ -120,7 +170,7 @@ func saveReceiptsAfterExecute(_ receipts: [TrashReceipt], to journal: ReceiptJou
     }
 }
 
-func scanReport() -> ScanReport {
+func scanReport(_ env: HostEnvironment) -> ScanReport {
     ToolScanner.scan(ScanOptions(
         env: env,
         catalog: catalog,
@@ -156,11 +206,11 @@ func reportAmbiguous(_ needle: String, _ groups: [ToolGroup], reason: String) ->
 // MARK: - 子命令
 
 switch parsed.command {
-case .help:
+case .help, .sweep:
     break // 上面已经处理
 
 case .scan(let json, let sizes, let verbose):
-    var report = scanReport()
+    var report = scanReport(env)
     if sizes {
         report = ToolScanner.measured(report, probe: DuSizeProbe())
     }
@@ -193,7 +243,7 @@ case .plan(let needle, let all, let execute, let receiptsPath):
         }
     }
 
-    let report = scanReport()
+    let report = scanReport(env)
     guard let group = selectGroup(needle, in: report) else {
         fail("没有找到「\(needle)」", code: 1)
     }
