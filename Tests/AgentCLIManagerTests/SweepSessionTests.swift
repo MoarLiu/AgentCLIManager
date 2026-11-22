@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import SwiftUI
 import Testing
@@ -213,7 +214,83 @@ import Testing
         #expect(!(await session.restore(run)))
         #expect(fixture.read(build + "/object.o") == "rebuilt in the meantime")
         #expect(fixture.messages.last?.isError == true)
+        #expect(session.restoreFailures.map(\.path) == [build])
+        #expect(session.restoreRunID == run.runID)
         #expect(session.pendingRuns.count == 1, "没放回的还留在可放回清单里")
+    }
+
+    @Test func receiptFailureKeepsTheReasonInTheSheetState() async throws {
+        let fixture = try SweepGUIFixture()
+        let build = fixture.swiftProject("app")
+        let session = await fixture.scanned()
+        await session.prepare(mode: .trash)
+        await session.execute(try #require(session.confirmation))
+        let run = try #require(session.resultRun)
+
+        // 回执被删掉：逐项结果都出不来，但弹窗仍要能说明原因。
+        try FileManager.default.removeItem(atPath: run.receipt)
+        #expect(!(await session.restore(run)))
+        #expect(session.restoreError != nil)
+        #expect(session.restoreRunID == run.runID)
+        #expect(!session.isRestoring)
+        #expect(!fixture.exists(build), "回执读不了时不能猜着搬回去")
+    }
+
+    @Test func stagingResidueIsListedWithoutAReceipt() async throws {
+        let fixture = try SweepGUIFixture()
+        fixture.swiftProject("app")
+        fixture.file(".acm-sweep-staging/ACM-Sweep-left/leftover/a.o", "left")
+        let session = await fixture.scanned()
+        await session.refreshPending()
+        let residue = session.residue(in: fixture.folder)
+        #expect(residue.count == 1)
+        #expect(residue.first?.path.hasSuffix("/.acm-sweep-staging/ACM-Sweep-left") == true)
+        #expect(residue.first?.run == nil)
+        #expect(session.plan?.warnings.contains { $0.code == "staging_residue" } == true)
+    }
+
+    @Test func excludingAnUnreadableDirectoryLetsTheScanFinish() async throws {
+        let fixture = try SweepGUIFixture()
+        let build = fixture.swiftProject("app")
+        let secret = fixture.path("secret")
+        try FileManager.default.createDirectory(atPath: secret, withIntermediateDirectories: true)
+        chmod(secret, 0)
+        defer { chmod(secret, 0o755) }
+        let session = fixture.session()
+        #expect(session.addFolder(fixture.folder))
+        await fixture.settle(session)
+        let blocked = try #require(session.error?.details["path"])
+        #expect(session.error?.code == "discovery_permission")
+        session.exclude(blocked)
+        await fixture.waitUntil { session.plan != nil }
+        #expect(session.error == nil)
+        #expect(session.plan?.items.contains { $0.path == build } == true)
+        #expect(fixture.savedExcludes.last?.0[fixture.folder]?.contains(blocked) == true)
+
+        session.exclude(fixture.path(build + "/object.o"))
+        await fixture.waitUntil { session.plan?.items.first { $0.path == build }?.status == .blocked }
+        #expect(session.plan?.items.first { $0.path == build }?.status == .blocked)
+    }
+
+    @Test func changedScanDropsTheConfirmationWithAMessage() async throws {
+        let fixture = try SweepGUIFixture()
+        fixture.swiftProject("app")
+        let gate = Gate()
+        gate.open()
+        let probes = SweepProbes(
+            openPaths: { gate.wait(); return [] },
+            gitTracked: { _, _ in .untracked }
+        )
+        let session = await fixture.scanned(probes: probes)
+        gate.close()
+        let preparing = Task { await session.prepare(mode: .trash) }
+        await fixture.waitUntil { session.isPreparing }
+        session.rescan()
+        session.selectedFolder = fixture.root
+        gate.open()
+        await preparing.value
+        #expect(session.confirmation == nil)
+        #expect(fixture.messages.contains { $0.text.contains("扫描结果已更新") })
     }
 
     @Test func earlierRunsAreFoundOnNextLaunch() async throws {
@@ -227,6 +304,7 @@ import Testing
         let relaunched = fixture.session(saved: [fixture.folder])
         #expect(relaunched.folders == [fixture.folder])
         #expect(relaunched.selectedFolder == fixture.folder)
+        await relaunched.refreshPending()
         let run = try #require(relaunched.pendingRuns.first)
         #expect(run.root == fixture.folder)
         #expect(run.items.map(\.path) == [build])
@@ -334,6 +412,10 @@ import Testing
         #expect(session.result?.items.contains { $0.status == .trashed } == true)
         session.showDemoPending()
         #expect(session.pendingRuns.first?.runID == "demo")
+        session.showDemoResidue()
+        #expect(session.residue(in: fixture.folder).isEmpty)
+        session.showDemoRestoreFailure()
+        #expect(session.restoreFailures.count == 1)
         #expect(fixture.exists(build))
     }
 
@@ -343,8 +425,12 @@ import Testing
         let session = await fixture.scanned()
         session.showDemoResult(mode: .permanent)
         session.showDemoPending()
+        session.showDemoResidue()
+        session.showDemoRestoreFailure()
         #expect(session.result == nil)
         #expect(session.pendingRuns.isEmpty)
+        #expect(session.stagingResidue.isEmpty)
+        #expect(session.restoreFailures.isEmpty)
     }
 
     // MARK: - 和 AppModel、窗口的衔接
@@ -430,6 +516,23 @@ private final class Clock: @unchecked Sendable {
     func advance(hours: Double) { lock.lock(); defer { lock.unlock() }; date += hours * 3600 }
 }
 
+/// 测试自己打开的门。探针堵在这里，界面状态可以趁这段时间变化。
+private final class Gate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var opened = false
+    func open() { lock.lock(); opened = true; lock.unlock() }
+    func close() { lock.lock(); opened = false; lock.unlock() }
+    func wait() {
+        while true {
+            lock.lock()
+            let ready = opened
+            lock.unlock()
+            if ready { return }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+    }
+}
+
 /// 可以中途改口的进程探针。
 private final class ProbeBox: @unchecked Sendable {
     private let lock = NSLock()
@@ -458,6 +561,8 @@ private final class SweepGUIFixture {
     let clock = Clock()
     private(set) var messages: [(text: String, isError: Bool)] = []
     private(set) var saved: [(folders: [String], path: String)] = []
+    private(set) var savedExcludes: [([String: [String]], String)] = []
+    var loadedExcludes: [String: [String]] = [:]
 
     init() throws {
         let unresolved = FileManager.default.temporaryDirectory
@@ -515,6 +620,8 @@ private final class SweepGUIFixture {
             probes: probes ?? SweepProbes(openPaths: { [] }, gitTracked: { _, _ in .untracked }),
             loadFolders: { _ in saved },
             saveFolders: { [weak self] folders, path in self?.saved.append((folders, path)) },
+            loadExcludes: { [weak self] _ in self?.loadedExcludes ?? [:] },
+            saveExcludes: { [weak self] excludes, path in self?.savedExcludes.append((excludes, path)) },
             now: { clock.now }
         )
     }
@@ -542,7 +649,7 @@ private final class SweepGUIFixture {
     func model(saved: [String] = [], scans: Counter? = nil) -> AppModel {
         let env = self.env
         return AppModel(snapshot: nil, dependencies: AppDependencies(
-            environment: { env }, catalog: { _ in Catalog(products: []) },
+            environment: { env }, catalog: { _ in LoadedCatalog(Catalog(products: [])) },
             scan: { _ in
                 scans?.increment()
                 return ScanReport(scannedAt: Date(), groups: [])

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import ACMCore
@@ -368,6 +369,125 @@ import Testing
         #expect(code("/etc") == "unsafe_path")
         #expect(code("") == "unsafe_path")
         #expect(code("Real/.build") == "没有抛错")
+    }
+
+    @Test func packageManagerAndSystemPrefixesAreRejected() throws {
+        let ws = try SweepWorkspace()
+        let env = ws.env()
+        func code(_ root: String) -> String {
+            sweepErrorCode { _ = try SweepScanner.scan(root: root, env: env, probes: SweepWorkspace.quiet) }
+        }
+        func message(_ root: String) -> String {
+            do {
+                _ = try SweepPath.normalizedRoot(root, env: env)
+                return ""
+            } catch let error as SweepError {
+                return error.message
+            } catch {
+                return String(describing: error)
+            }
+        }
+        if SweepPath.realpath("/opt") != nil {
+            #expect(code("/opt") == "broad_root")
+            #expect(message("/opt").contains("包管理器前缀"))
+        }
+        if SweepPath.realpath("/opt/homebrew") != nil {
+            #expect(code("/opt/homebrew") == "broad_root")
+            if SweepFS.isDirectory("/opt/homebrew/lib") {
+                #expect(code("/opt/homebrew/lib") == "broad_root")
+            }
+        }
+        if SweepPath.realpath("/private/etc") != nil {
+            #expect(code("/private/etc") == "system_root")
+            #expect(code("/etc") == "system_root")
+        }
+        if SweepPath.realpath("/cores") != nil {
+            #expect(code("/cores") == "system_root")
+        }
+        if SweepPath.realpath("/private/tftpboot") != nil {
+            #expect(code("/private/tftpboot") == "system_root")
+        }
+        #expect(sweepErrorCode { try SweepPath.rejectBlank("") } == "usage")
+        #expect(sweepErrorCode { try SweepPath.rejectBlank(" \n\t") } == "usage")
+        #expect(sweepErrorCode { try SweepPath.rejectBlank(ws.root) } == "没有抛错")
+    }
+
+    @Test func globalNodeModulesWithoutAProjectManifestIsNotCleanup() throws {
+        let ws = try SweepWorkspace()
+        ws.file("lib/node_modules/left-pad/.package-lock.json", "{}")
+        ws.file("lib/node_modules/left-pad/index.js", "module.exports = 1\n")
+        ws.file("lib/python3.13/site.py", "site")
+        ws.file("app/package.json", "{\"name\":\"app\"}\n")
+        ws.file("app/node_modules/.package-lock.json", "{}")
+        ws.file("app/node_modules/left-pad/index.js", "module.exports = 1\n")
+        let plan = try ws.scan()
+        let global = plan.items.filter { $0.path.contains("lib/node_modules") }
+        #expect(global.allSatisfy { $0.status != .cleanup }, "\(global.map(\.path))")
+        #expect(plan.item("app/node_modules")?.status == .cleanup)
+    }
+
+    @Test func excludingUnreadableDirectoryProducesAResult() throws {
+        let ws = try SweepWorkspace()
+        let cache = ws.swiftProject("App")
+        ws.dir("App/secret")
+        chmod(ws.path("App/secret"), 0)
+        defer { chmod(ws.path("App/secret"), 0o755) }
+        #expect(sweepErrorCode { _ = try ws.scan() } == "discovery_permission")
+        let plan = try ws.scan(policy: SweepPolicy(excludes: [ws.path("App/secret")]))
+        #expect(plan.item(cache)?.status == .cleanup)
+    }
+
+    @Test func scanCachesTheGitIndexOncePerRepository() throws {
+        let ws = try SweepWorkspace()
+        ws.dir("App/.git")
+        ws.file("App/a/__pycache__/a.cpython-313.pyc", "a")
+        ws.file("App/b/__pycache__/b.cpython-313.pyc", "b")
+        let counter = Recorder()
+        let probes = SweepProbes(
+            openPaths: { [] },
+            gitTracked: { _, _ in
+                counter.add("tracked")
+                return .failed
+            },
+            gitIndex: { _ in
+                counter.add("index")
+                return .files(["a/__pycache__/a.cpython-313.pyc"])
+            }
+        )
+        let plan = try ws.scan(probes: probes)
+        #expect(counter.values == ["index"])
+        #expect(plan.item("App/a/__pycache__")?.status == .blocked)
+        #expect(plan.item("App/a/__pycache__")?.reason == "包含 Git 已跟踪文件。")
+        #expect(plan.item("App/b/__pycache__")?.status == .cleanup)
+    }
+
+    @Test func stagingResidueIsReportedButNotCleaned() throws {
+        let ws = try SweepWorkspace()
+        let cache = ws.swiftProject("App")
+        ws.dir(".acm-sweep-staging/ACM-Sweep-abc/leftover")
+        ws.file(".acm-sweep-staging/ACM-Sweep-abc/leftover/a.o", "x")
+        let plan = try ws.scan()
+        #expect(plan.item(cache)?.status == .cleanup)
+        #expect(!plan.items.contains { $0.path.contains(".acm-sweep-staging") })
+        #expect(plan.warnings.contains { $0.code == "staging_residue" })
+        let residue = SweepRestorer.stagingResidue(root: ws.root, env: ws.env())
+        #expect(residue.map(\.id) == ["ACM-Sweep-abc"])
+        #expect(residue.first?.run == nil)
+        #expect(SweepRestorer.stagingResidueOnDisk(root: ws.root).map(\.id) == ["ACM-Sweep-abc"])
+    }
+
+    @Test func missingGitIsNamedSeparately() throws {
+        let ws = try SweepWorkspace()
+        ws.dir("App/.git")
+        ws.file("App/__pycache__/a.cpython-313.pyc", "a")
+        let probes = SweepProbes(
+            openPaths: { [] },
+            gitTracked: { _, _ in .failed },
+            gitIndex: { _ in .missing }
+        )
+        let item = try #require(try ws.scan(probes: probes).item("App/__pycache__"))
+        #expect(item.status == .blocked)
+        #expect(item.reason == "没有找到 git，无法确认是否包含已跟踪文件。")
     }
 
     /// 摘要里的字符串写法必须和 BuildSweep 一致，否则两边的指纹对不上。

@@ -213,7 +213,6 @@ enum SweepState {
     /// 确保目录存在、是当前用户的、别人进不来；返回它。
     @discardableResult
     static func privateDirectory(_ path: String, what: String = "工具状态目录") throws -> String {
-        let unsafe = SweepError("unsafe_state", "\(what)必须是当前用户独占的真实目录。", details: ["path": path])
         if SweepFS.lstat(path) == nil {
             try FileManager.default.createDirectory(
                 atPath: SweepPath.parent(path), withIntermediateDirectories: true
@@ -222,9 +221,21 @@ enum SweepState {
                 throw SweepError.posix("无法创建\(what)", errno)
             }
         }
-        guard let info = SweepFS.lstat(path), SweepFS.isDirectory(info),
-              info.st_uid == getuid(), info.st_mode & 0o077 == 0
-        else { throw unsafe }
+        guard let info = SweepFS.lstat(path) else {
+            throw SweepError("unsafe_state", "无法读取\(what)。", details: ["path": path])
+        }
+        if SweepFS.isSymlink(info) {
+            throw SweepError("unsafe_state", "\(what)是符号链接，没有跟随它。", details: ["path": path])
+        }
+        guard SweepFS.isDirectory(info) else {
+            throw SweepError("unsafe_state", "\(what)不是目录。", details: ["path": path])
+        }
+        if info.st_uid != getuid() {
+            throw SweepError("unsafe_state", "\(what)不属于当前用户。", details: ["path": path])
+        }
+        if info.st_mode & 0o077 != 0 {
+            throw SweepError("unsafe_state", "\(what)对同组或其他用户开放了访问权限。", details: ["path": path])
+        }
         return path
     }
 

@@ -9,6 +9,9 @@ struct SweepDependencies {
     /// 读、写「扫描过的文件夹」清单；路径由调用方给出
     var loadFolders: (String) -> [String]
     var saveFolders: ([String], String) throws -> Void
+    /// 每个文件夹的排除路径。和文件夹清单分开存，格式互不影响。
+    var loadExcludes: (String) -> [String: [String]]
+    var saveExcludes: ([String: [String]], String) throws -> Void
     /// 现在几点。计划 24 小时后过期、闲置多久都按它算。
     var now: @Sendable () -> Date = { Date() }
 
@@ -26,6 +29,18 @@ struct SweepDependencies {
                     atPath: PathUtil.parent(path), withIntermediateDirectories: true
                 )
                 try JSONEncoder().encode(folders).write(to: URL(fileURLWithPath: path), options: .atomic)
+            },
+            loadExcludes: { path in
+                guard let data = FileManager.default.contents(atPath: path),
+                      let stored = try? JSONDecoder().decode([String: [String]].self, from: data)
+                else { return [:] }
+                return stored
+            },
+            saveExcludes: { excludes, path in
+                try FileManager.default.createDirectory(
+                    atPath: PathUtil.parent(path), withIntermediateDirectories: true
+                )
+                try JSONEncoder().encode(excludes).write(to: URL(fileURLWithPath: path), options: .atomic)
             }
         )
     }
@@ -102,8 +117,21 @@ final class SweepSession {
     private(set) var pendingRuns: [SweepPendingRun] = []
     private(set) var isRestoring = false
     var showRecovery = false
+    /// 最近一次放回没能完成的条目，连同那次回执。弹窗里要能看见，不能只靠横幅。
+    private(set) var restoreFailures: [SweepOutcome] = []
+    private(set) var restoreRunID: String?
+    private(set) var restoreReceipt: String?
+    /// 放回在逐项处理之前就失败时的原因（回执读不了、根目录被换掉等）。
+    private(set) var restoreError: String?
+    /// 文件夹 → 排除掉的绝对路径。候选目录里含有其中一条时，整项仍然阻止。
+    private(set) var excludes: [String: [String]] = [:]
+    /// 文件夹 → 永久删除中断后留在项目根里的暂存目录。
+    private(set) var stagingResidue: [String: [SweepStagingResidue]] = [:]
+    private var pendingRefresh: Task<Void, Never>?
 
     var isBusy: Bool { isApplying || isRestoring }
+    /// 扫描、核对或执行期间，会改结果的控件都停用。
+    var interactionLocked: Bool { isBusy || isPreparing || isScanningAny }
 
     init(env: HostEnvironment, dependencies: SweepDependencies, readOnly: Bool) {
         self.env = env
@@ -111,12 +139,14 @@ final class SweepSession {
         self.readOnly = readOnly
         if !readOnly {
             folders = dependencies.loadFolders(foldersPath)
+            excludes = dependencies.loadExcludes(excludesPath)
             selectedFolder = folders.first
-            refreshPending()
+            scheduleRefreshPending()
         }
     }
 
     private var foldersPath: String { env.ownSupportDir + "/sweep-folders.json" }
+    private var excludesPath: String { env.ownSupportDir + "/sweep-excludes.json" }
 
     // MARK: - 文件夹
 
@@ -140,7 +170,7 @@ final class SweepSession {
 
     /// 只是从清单里拿掉，不动文件夹本身。
     func removeFolder(_ folder: String) {
-        guard !isBusy else { return }
+        guard !interactionLocked else { return }
         folders.removeAll { $0 == folder }
         plans[folder] = nil
         errors[folder] = nil
@@ -174,6 +204,39 @@ final class SweepSession {
         }
     }
 
+    func excludedPaths(in folder: String) -> [String] { excludes[folder] ?? [] }
+
+    /// 把一个读不了或用户不想扫的路径排除掉，然后重扫。排除清单会留下来，可以再取消。
+    func exclude(_ path: String, in folder: String? = nil) {
+        guard !interactionLocked, let folder = folder ?? selectedFolder else { return }
+        var list = excludes[folder] ?? []
+        guard !list.contains(path) else {
+            Task { await scan(folder) }
+            return
+        }
+        list.append(path)
+        excludes[folder] = list
+        persistExcludes()
+        Task { await scan(folder) }
+    }
+
+    func unexclude(_ path: String, in folder: String? = nil) {
+        guard !interactionLocked, let folder = folder ?? selectedFolder, var list = excludes[folder] else { return }
+        list.removeAll { $0 == path }
+        excludes[folder] = list.isEmpty ? nil : list
+        persistExcludes()
+        Task { await scan(folder) }
+    }
+
+    private func persistExcludes() {
+        guard !readOnly else { return }
+        do {
+            try dependencies.saveExcludes(excludes, excludesPath)
+        } catch {
+            onMessage("没能保存排除清单：\(error.localizedDescription)", true)
+        }
+    }
+
     // MARK: - 扫描
 
     var plan: SweepPlan? { selectedFolder.flatMap { plans[$0] } }
@@ -184,13 +247,13 @@ final class SweepSession {
     func isScanning(_ folder: String) -> Bool { scanning.contains(folder) }
 
     func rescan() {
-        guard let folder = selectedFolder else { return }
+        guard !isBusy, !isPreparing, !isScanningAny, let folder = selectedFolder else { return }
         Task { await scan(folder) }
     }
 
     /// 换一档闲置时间：之前的结论都作废，重新扫描。
     func setIdle(_ value: SweepIdle) {
-        guard value != idle else { return }
+        guard !isBusy, !isPreparing, value != idle else { return }
         idle = value
         for folder in folders { generations[folder, default: 0] += 1 }
         scanning = []
@@ -205,7 +268,7 @@ final class SweepSession {
         scanning.insert(folder)
         let env = self.env
         let probes = dependencies.probes
-        let policy = SweepPolicy(idleHours: idle.rawValue)
+        let policy = SweepPolicy(idleHours: idle.rawValue, excludes: excludes[folder] ?? [])
         let now = dependencies.now()
         let outcome = await Task.detached(priority: .userInitiated) { () -> Result<SweepPlan, SweepError> in
             do {
@@ -228,6 +291,7 @@ final class SweepSession {
             selection[folder] = nil
             errors[folder] = error
         }
+        scheduleRefreshPending()
     }
 
     /// 默认勾选：有依据的缓存和内容相同的重复安装包。「已有更新版本」的旧安装包不勾——
@@ -294,7 +358,7 @@ final class SweepSession {
 
     /// 对着磁盘把勾选的项目重新核对一遍，然后打开确认单。这一步不动任何文件。
     func prepare(mode: SweepMode) async {
-        guard !isBusy, !isPreparing, let folder = selectedFolder, let plan else { return }
+        guard !interactionLocked, let folder = selectedFolder, let plan else { return }
         // 没有勾选就什么都不做。执行器把「没点名」理解成「全部可清理项」，这里绝不能走到那一步。
         let ids = selectedItems.map(\.id)
         guard !ids.isEmpty else { return }
@@ -310,7 +374,10 @@ final class SweepSession {
                 )
             }
         }.value
-        guard selectedFolder == folder, plans[folder] == plan else { return }
+        guard selectedFolder == folder, plans[folder] == plan else {
+            onMessage("扫描结果已更新，请重新打开确认单。", false)
+            return
+        }
         switch outcome {
         case .success(let preview):
             confirmationError = nil
@@ -346,7 +413,7 @@ final class SweepSession {
             self.confirmation = nil
             resultFolder = confirmation.folder
             result = applied
-            refreshPending()
+            await refreshPending()
             await scan(confirmation.folder)
         case .failure(let error):
             // 一步都没做。留在确认单上把原因说清楚。
@@ -362,9 +429,28 @@ final class SweepSession {
 
     // MARK: - 放回
 
-    func refreshPending() {
+    func residue(in folder: String) -> [SweepStagingResidue] { stagingResidue[folder] ?? [] }
+
+    func scheduleRefreshPending() {
+        Task { await refreshPending() }
+    }
+
+    /// 在后台读回执和暂存残留。多次调用会排成一队，后一次能看到前一次之后的磁盘变化。
+    func refreshPending() async {
         guard !readOnly else { return }
-        pendingRuns = SweepRestorer.pendingRuns(env: env)
+        let previous = pendingRefresh
+        let env = self.env
+        let folders = folders
+        let task = Task { @MainActor in
+            await previous?.value
+            let index = await Task.detached(priority: .utility) {
+                SweepRestorer.recoveryIndex(env: env, folders: folders)
+            }.value
+            pendingRuns = index.runs
+            stagingResidue = index.residue
+        }
+        pendingRefresh = task
+        await task.value
     }
 
     /// 结果弹窗对应的那一次执行，如果它还有东西可以放回。
@@ -378,28 +464,40 @@ final class SweepSession {
     func restore(_ run: SweepPendingRun) async -> Bool {
         guard !readOnly, !isBusy else { return false }
         isRestoring = true
+        defer { isRestoring = false }
+        restoreRunID = run.runID
+        restoreReceipt = run.receipt
+        restoreFailures = []
+        restoreError = nil
         let env = self.env
         let receipt = run.receipt
         let outcome = await Task.detached(priority: .userInitiated) { () -> Result<SweepRestoreResult, SweepError> in
             Self.attempt { try SweepRestorer.restore(receipt: receipt, execute: true, env: env) }
         }.value
-        isRestoring = false
-        refreshPending()
+        await refreshPending()
         let name = PathUtil.lastComponent(run.root)
         var complete = false
         switch outcome {
         case .success(let restored):
             let done = restored.items.filter { $0.status == .restored }.count
-            let failed = restored.items.filter { $0.status.isFailure }
-            if failed.isEmpty {
+            let skipped = restored.items.filter { $0.status == .notAttempted }
+            let failed = restored.items.filter { $0.status.isFailure && $0.status != .notAttempted }
+            restoreFailures = failed + skipped
+            if failed.isEmpty && skipped.isEmpty {
                 complete = true
                 onMessage("已把「\(name)」的 \(done) 项放回原处", false)
+            } else if failed.isEmpty {
+                onMessage("放回了 \(done) 项。另有 \(skipped.count) 项未执行", true)
             } else {
                 let reasons = failed.map { "\($0.path)（\($0.reason ?? $0.status.displayName)）" }
-                onMessage("放回了 \(done) 项，\(failed.count) 项没能放回：" + reasons.joined(separator: "；"), true)
+                var text = "放回了 \(done) 项，\(failed.count) 项没能放回：" + reasons.joined(separator: "；")
+                if !skipped.isEmpty { text += "。另有 \(skipped.count) 项未执行" }
+                onMessage(text, true)
             }
         case .failure(let error):
-            onMessage("没能放回「\(name)」：\(Self.explain(error))", true)
+            let text = Self.explain(error)
+            restoreError = text
+            onMessage("没能放回「\(name)」：\(text)", true)
         }
         if folders.contains(run.root) { await scan(run.root) }
         return complete
@@ -462,5 +560,26 @@ final class SweepSession {
             runID: "demo", receipt: "/demo/receipt.jsonl", root: folder, mode: .trash,
             createdAt: Date().addingTimeInterval(-1800), items: Array(items)
         )]
+    }
+
+    /// 截图模式用：只从磁盘列出实际暂存目录，不读回执。
+    func showDemoResidue() {
+        guard readOnly, let folder = selectedFolder else { return }
+        let found = SweepRestorer.stagingResidueOnDisk(root: folder)
+        stagingResidue = found.isEmpty ? [:] : [folder: found]
+    }
+
+    /// 截图模式用：摆一条「放回时原处已有内容」的失败，不碰文件。
+    func showDemoRestoreFailure() {
+        guard readOnly, let result, let receipt = result.receipt, let item = result.items.first else { return }
+        restoreReceipt = receipt
+        restoreRunID = "demo"
+        restoreFailures = [
+            SweepOutcome(
+                id: item.id, path: item.path, status: .blocked,
+                reason: "原路径已有内容，恢复不会覆盖。",
+                recoveryPath: "/demo/trash/" + item.id
+            )
+        ]
     }
 }

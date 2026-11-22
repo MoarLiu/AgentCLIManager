@@ -39,7 +39,7 @@ struct RootView: View {
                     Label("重新扫描", systemImage: "arrow.clockwise")
                 }
                 .disabled(sweeping
-                          ? model.sweep.selectedFolder == nil || model.sweep.isScanning || model.sweep.isBusy
+                          ? model.sweep.selectedFolder == nil || model.sweep.interactionLocked
                           : model.isScanning)
                 .help(sweeping ? "重新扫描这个文件夹（⌘R）" : "重新扫描（⌘R）")
 
@@ -49,7 +49,7 @@ struct RootView: View {
                     } label: {
                         Text("添加文件夹…")
                     }
-                    .disabled(model.snapshot != nil)
+                    .disabled(model.snapshot != nil || model.sweep.interactionLocked)
                     .help("选一个放项目或下载文件的文件夹来清理")
                 } else {
                     Button {

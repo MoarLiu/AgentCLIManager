@@ -7,8 +7,9 @@ import Foundation
 /// 返回退出码：0 成功，1 运行时失败（包括有任何一项被跳过或没走完），2 用法错误。
 func runSweep(_ arguments: SweepArguments, env: HostEnvironment) -> Int32 {
     let cwd = FileManager.default.currentDirectoryPath
-    func absolute(_ value: String) -> String {
-        SweepPath.absolute(value, home: env.home, cwd: cwd)
+    func absolute(_ value: String) throws -> String {
+        try SweepPath.rejectBlank(value)
+        return SweepPath.absolute(value, home: env.home, cwd: cwd)
     }
     func confine(_ root: String) throws {
         if arguments.home != nil { try SweepPath.requireInside(root, home: env.home) }
@@ -22,15 +23,17 @@ func runSweep(_ arguments: SweepArguments, env: HostEnvironment) -> Int32 {
     do {
         switch arguments.command {
         case .scan(let root, let out, let idleHours, let maxEntries, let excludes):
-            try confine(absolute(root))
+            let scanRoot = try absolute(root)
+            let outputPath = try out.map(absolute)
+            try confine(scanRoot)
             var plan = try SweepScanner.scan(
-                root: absolute(root),
-                policy: SweepPolicy(idleHours: idleHours, maxEntries: maxEntries, excludes: excludes.map(absolute)),
+                root: scanRoot,
+                policy: SweepPolicy(idleHours: idleHours, maxEntries: maxEntries, excludes: try excludes.map(absolute)),
                 env: env,
                 now: Date()
             )
-            if let out {
-                plan.planFile = try SweepPlanStore.write(plan, to: absolute(out))
+            if let outputPath {
+                plan.planFile = try SweepPlanStore.write(plan, to: outputPath)
             }
             print(arguments.json ? SweepOutput.json(plan) : SweepOutput.text(plan))
 

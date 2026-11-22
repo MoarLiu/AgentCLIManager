@@ -366,10 +366,12 @@ public enum SweepOutcomeStatus: String, Codable, Sendable {
     case missing
     /// 内容已经放回，但回执没能更新
     case restoredReceiptFailed = "restored_receipt_failed"
+    /// 前一项中断后，这一项没有开始
+    case notAttempted = "not_attempted"
 
     /// 这一项没有按预期完成。
     public var isFailure: Bool {
-        [.blocked, .missing, .recoveryRequired, .restoredReceiptFailed].contains(self)
+        [.blocked, .missing, .recoveryRequired, .restoredReceiptFailed, .notAttempted].contains(self)
     }
 
     public var displayName: String {
@@ -384,6 +386,7 @@ public enum SweepOutcomeStatus: String, Codable, Sendable {
         case .alreadyRestored: return "此前已放回"
         case .missing: return "暂存内容缺失"
         case .restoredReceiptFailed: return "已放回，回执未更新"
+        case .notAttempted: return "未执行"
         }
     }
 }
@@ -505,5 +508,29 @@ public struct SweepPendingRun: Sendable, Hashable, Identifiable {
         self.mode = mode
         self.createdAt = createdAt
         self.items = items
+    }
+}
+
+/// 扫描根里留下的永久删除暂存。有回执时可以放回，没有回执时只能查看。
+public struct SweepStagingResidue: Sendable, Hashable, Identifiable {
+    public var id: String
+    public var path: String
+    public var run: SweepPendingRun?
+
+    public init(id: String, path: String, run: SweepPendingRun?) {
+        self.id = id
+        self.path = path
+        self.run = run
+    }
+}
+
+/// 一次后台读取得到的可放回清单，以及这些文件夹里的暂存残留。
+public struct SweepRecoveryIndex: Sendable {
+    public var runs: [SweepPendingRun]
+    public var residue: [String: [SweepStagingResidue]]
+
+    public init(runs: [SweepPendingRun], residue: [String: [SweepStagingResidue]]) {
+        self.runs = runs
+        self.residue = residue
     }
 }

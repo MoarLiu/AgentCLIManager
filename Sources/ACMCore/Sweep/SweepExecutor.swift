@@ -40,7 +40,10 @@ public enum SweepExecutor {
         journalFault: SweepJournal.Fault?
     ) throws -> SweepApplyResult {
         let (chosen, unselected) = try choose(plan, identifiers: identifiers, includeOldVersions: includeOldVersions)
-        var (root, outcomes) = try revalidate(plan, chosen: chosen, env: env, probes: probes, now: now)
+        let hashes = SweepContentHashCache()
+        var (root, outcomes) = try revalidate(
+            plan, chosen: chosen, env: env, probes: probes, now: now, hashes: hashes
+        )
         var result = SweepApplyResult(
             executed: false, mode: mode, root: root, receipt: nil, items: outcomes, unselectedIDs: unselected
         )
@@ -48,7 +51,9 @@ public enum SweepExecutor {
 
         return try SweepState.withRootLock(root, env: env) {
             // 拿到锁之后再核对一遍：另一次执行可能刚刚结束。
-            (root, outcomes) = try revalidate(plan, chosen: chosen, env: env, probes: probes, now: now)
+            (root, outcomes) = try revalidate(
+                plan, chosen: chosen, env: env, probes: probes, now: now, hashes: hashes
+            )
             result.items = outcomes
             guard outcomes.contains(where: { $0.status == .ready }) else { return result }
 
@@ -143,7 +148,10 @@ public enum SweepExecutor {
                     outcomes[index].status = moved ? .recoveryRequired : .blocked
                     outcomes[index].reason = (error as? SweepError)?.message ?? error.localizedDescription
                     // 已经移走却没走完：回执可能写不进去了，剩下的一项都不再动。
-                    if moved { break }
+                    if moved {
+                        markNotAttempted(&outcomes, after: index, reason: "前一项没有走完，这一项没有执行。")
+                        break
+                    }
                 }
             }
 
@@ -187,7 +195,8 @@ public enum SweepExecutor {
 
     /// 重新扫描一遍，看选中的每一项是否还和计划里一模一样。
     static func revalidate(
-        _ plan: SweepPlan, chosen: [SweepItem], env: HostEnvironment, probes: SweepProbes, now: Date?
+        _ plan: SweepPlan, chosen: [SweepItem], env: HostEnvironment, probes: SweepProbes, now: Date?,
+        hashes: SweepContentHashCache
     ) throws -> (root: String, outcomes: [SweepOutcome]) {
         let root = try SweepPath.normalizedRoot(plan.root, env: env)
         guard root == plan.root, try SweepPath.rootIdentity(root) == plan.rootIdentity else {
@@ -197,7 +206,9 @@ public enum SweepExecutor {
         guard (0...24 * 3600).contains(age) else {
             throw SweepError("expired_plan", "计划超过 24 小时或时间异常，请重新扫描。")
         }
-        let current = try SweepScanner.scan(root: root, policy: plan.policy, env: env, probes: probes, now: now)
+        let current = try SweepScanner.scan(
+            root: root, policy: plan.policy, env: env, probes: probes, now: now, hashes: hashes
+        )
         let fresh = Dictionary(current.items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let original = Dictionary(plan.items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 
@@ -302,6 +313,13 @@ public enum SweepExecutor {
         }
         guard unlinkat(parentFD, name, AT_REMOVEDIR) == 0 else {
             throw SweepError.posix("无法删除暂存目录", errno)
+        }
+    }
+
+    private static func markNotAttempted(_ outcomes: inout [SweepOutcome], after index: Int, reason: String) {
+        for later in outcomes.indices where later > index && outcomes[later].status == .ready {
+            outcomes[later].status = .notAttempted
+            outcomes[later].reason = reason
         }
     }
 

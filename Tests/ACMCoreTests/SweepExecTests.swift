@@ -426,12 +426,14 @@ private func lines(_ path: String) -> [String] {
         try FileManager.default.createDirectory(atPath: elsewhere, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(atPath: run.trash, withDestinationPath: elsewhere)
         #expect(sweepErrorCode { _ = try run.apply(plan, mode: .trash) } == "unsafe_state")
+        #expect(try sweepErrorText { _ = try run.apply(plan, mode: .trash) }.contains("符号链接"))
         #expect(try FileManager.default.contentsOfDirectory(atPath: elsewhere).isEmpty)
 
         try FileManager.default.removeItem(atPath: run.trash)
         try FileManager.default.createDirectory(atPath: run.trash, withIntermediateDirectories: true)
         chmod(run.trash, 0o755)
         #expect(sweepErrorCode { _ = try run.apply(plan, mode: .trash) } == "unsafe_state")
+        #expect(try sweepErrorText { _ = try run.apply(plan, mode: .trash) }.contains("开放了访问权限"))
         #expect(run.exists(cache + "/object.o"))
         // 这些失败都发生在建回执之前。
         let receipts = (try? FileManager.default.contentsOfDirectory(atPath: SweepState.runs(run.env))) ?? []
@@ -502,6 +504,7 @@ private func lines(_ path: String) -> [String] {
         ws.file(cache + "/new.txt", "new")
         let blocked = try run.restore(result.receipt)
         #expect(blocked.items.map(\.status) == [.blocked])
+        #expect(blocked.items.first?.recoveryPath == staged)
         #expect(blocked.incomplete)
         #expect(run.read(cache + "/new.txt") == "new")
         #expect(exists(staged + "/object.o"))
@@ -522,13 +525,32 @@ private func lines(_ path: String) -> [String] {
         let run = Run(ws)
         let plan = try run.scan()
         let result = try run.apply(plan, fault: failing(at: "staged"))
-        // 回执写不进去之后不再继续：第二项原地不动，仍是「可执行」而不是被悄悄处理。
-        #expect(result.items.map(\.status) == [.recoveryRequired, .ready])
+        // 回执写不进去之后不再继续：第二项原地不动，标成「未执行」而不是「可执行」。
+        #expect(result.items.map(\.status) == [.recoveryRequired, .notAttempted])
+        #expect(result.items[1].reason == "前一项没有走完，这一项没有执行。")
         let untouched = result.items[1].path
         #expect(run.exists(untouched + "/object.o"))
         #expect(Set([first, second]).contains(untouched))
         #expect(try run.restore(result.receipt).items.map(\.status) == [.restored])
         #expect(run.exists(first + "/object.o") && run.exists(second + "/object.o"))
+    }
+
+    @Test func precheckDoesNotTrustTheScanGitIndex() throws {
+        let ws = try SweepWorkspace()
+        ws.dir("App/.git")
+        let cache = ws.swiftProject("App")
+        let run = Run(ws)
+        let plan = try run.scan()
+        #expect(plan.item(cache)?.status == .cleanup)
+        let probes = SweepProbes(
+            openPaths: { [] },
+            gitTracked: { _, _ in .tracked },
+            gitIndex: { _ in .files([]) }
+        )
+        let result = try run.apply(plan, probes: probes)
+        #expect(result.items.map(\.status) == [.blocked])
+        #expect(result.items[0].reason == "包含 Git 已跟踪文件。")
+        #expect(run.exists(cache + "/object.o"))
     }
 
     @Test func undeletableContentStaysInStagingForTheUser() throws {

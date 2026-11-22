@@ -14,6 +14,19 @@ public enum SweepScanner {
         probes: SweepProbes = .live,
         now: Date? = nil
     ) throws -> SweepPlan {
+        try scan(
+            root: rootValue, policy: policy, env: env, probes: probes, now: now, hashes: SweepContentHashCache()
+        )
+    }
+
+    static func scan(
+        root rootValue: String,
+        policy: SweepPolicy = SweepPolicy(),
+        env: HostEnvironment,
+        probes: SweepProbes = .live,
+        now: Date? = nil,
+        hashes: SweepContentHashCache
+    ) throws -> SweepPlan {
         guard policy.idleHours.isFinite, policy.idleHours >= 0 else {
             throw SweepError("invalid_policy", "闲置时间必须是非负有限数值。")
         }
@@ -39,7 +52,7 @@ public enum SweepScanner {
         }
 
         var discovery = Discovery(
-            root: root, rootDevice: rootDevice, protected: protected, maxEntries: policy.maxEntries
+            root: root, rootDevice: rootDevice, protected: protected, maxEntries: policy.maxEntries, hashes: hashes
         )
         try discovery.walk(root, depth: 0)
         var items = discovery.items
@@ -52,11 +65,13 @@ public enum SweepScanner {
         finalizeVersions(&items)
 
         let moment = (now ?? env.now).timeIntervalSince1970
+        let prepared = preparedOpenPaths(records)
+        var git = ScanGitCache(probes: probes)
         for index in items.indices where items[index].status == .cleanup {
             let item = items[index]
             let path = SweepPath.join(root, item.path)
             let project = item.project.map { SweepPath.join(root, $0) }
-            if let reason = trackedReason(path, probes: probes) {
+            if let reason = trackedReason(path, cache: &git) {
                 items[index].status = .blocked
                 items[index].reason = reason
                 continue
@@ -66,7 +81,9 @@ public enum SweepScanner {
                 items[index].reason = "进程检查未完成。"
                 continue
             }
-            let users = processUsers(path: path, project: project, records: records)
+            let users = processUsers(
+                path: SweepPath.Parts(path), project: project.map(SweepPath.Parts.init), records: prepared
+            )
             if !users.isEmpty {
                 items[index].status = .blocked
                 items[index].reason = "有进程正在使用该目录或项目。"
@@ -78,6 +95,14 @@ public enum SweepScanner {
                 items[index].status = .review
                 items[index].reason = "最近仍有写入，暂不自动清理。"
             }
+        }
+
+        let staging = SweepPath.join(root, SweepState.stagingName)
+        if let info = SweepFS.lstat(staging), SweepFS.isDirectory(info), !SweepFS.isSymlink(info) {
+            warnings.append(SweepWarning(
+                code: "staging_residue",
+                message: "发现未完成的永久删除暂存。它不会被当作缓存清理；可在界面里查看残留，或按回执放回。 \(staging)"
+            ))
         }
 
         return SweepPlan(
@@ -106,6 +131,7 @@ public enum SweepScanner {
         let rootDevice: dev_t?
         let protected: [String]
         let maxEntries: Int
+        var hashes: SweepContentHashCache
         var items: [SweepItem] = []
         var visited = 0
 
@@ -142,7 +168,7 @@ public enum SweepScanner {
                         }
                         continue
                     }
-                    if SweepRecognizer.protectedNames.contains(name), name != "node_modules" { continue }
+                    if SweepRecognizer.protectedNames.contains(name) { continue }
                     let kind: SweepRecognizer.Kind?
                     do {
                         kind = try SweepRecognizer.cacheKind(path, project: project)
@@ -185,9 +211,11 @@ public enum SweepScanner {
             } else {
                 do {
                     let isFile = SweepFS.lstat(path).map(SweepFS.isRegular) ?? false
+                    // 对拍脚本比较整个 snapshot，其中包含 content_sha256。
+                    // 所以每个认出来的单文件安装包仍计算摘要；同一轮按文件身份复用，不重复读。
                     item.snapshot = try SweepSnapshotter.snapshot(
                         root: root, relative: relative, maxEntries: maxEntries,
-                        contentHash: installer?.recognized == true && isFile
+                        contentHash: installer?.recognized == true && isFile, hashes: hashes
                     )
                 } catch let error as SweepError {
                     item.status = .blocked
@@ -316,13 +344,27 @@ public enum SweepScanner {
     // MARK: - 保护条件
 
     /// 找到最近的 Git 仓库，问它这个路径下有没有被跟踪的文件。
+    /// 执行前的复核走这条：每次都问 Git，不用扫描轮次里的索引缓存。
     static func trackedReason(_ path: String, probes: SweepProbes) -> String? {
-        guard let repository = SweepPath.ancestors(of: path).first(where: { SweepFS.exists(SweepPath.join($0, ".git")) })
-        else { return nil }
-        switch probes.gitTracked(repository, SweepPath.relative(path, to: repository)) {
+        guard let repository = repository(containing: path) else { return nil }
+        return reason(for: probes.gitTracked(repository, SweepPath.relative(path, to: repository)))
+    }
+
+    static func trackedReason(_ path: String, cache: inout ScanGitCache) -> String? {
+        guard let repository = repository(containing: path) else { return nil }
+        return reason(for: cache.answer(repository: repository, relative: SweepPath.relative(path, to: repository)))
+    }
+
+    private static func repository(containing path: String) -> String? {
+        SweepPath.ancestors(of: path).first { SweepFS.exists(SweepPath.join($0, ".git")) }
+    }
+
+    private static func reason(for answer: SweepGitAnswer) -> String? {
+        switch answer {
         case .untracked: return nil
         case .tracked: return "包含 Git 已跟踪文件。"
         case .failed: return "无法完整读取所属仓库的 Git 索引。"
+        case .missing: return "没有找到 git，无法确认是否包含已跟踪文件。"
         }
     }
 
@@ -331,17 +373,43 @@ public enum SweepScanner {
         "cargo", "rustc", "xcodebuild", "pytest", "java", "ruby",
     ]
 
+    struct PreparedOpenPath: Sendable {
+        var pid: Int32
+        var command: String
+        var isCwd: Bool
+        var isDevelopment: Bool
+        var parts: SweepPath.Parts
+    }
+
+    /// 一轮扫描只拆一次。执行前那次 `lsof` 的结果也在用之前拆好。
+    static func preparedOpenPaths(_ records: [SweepOpenPath]) -> [PreparedOpenPath] {
+        records.map { record in
+            let command = record.command.lowercased()
+            return PreparedOpenPath(
+                pid: record.pid,
+                command: record.command,
+                isCwd: record.isCwd,
+                isDevelopment: developmentCommands.contains { command.hasPrefix($0) },
+                parts: SweepPath.Parts(record.path)
+            )
+        }
+    }
+
     /// 谁在用这个候选项：直接打开了里面的文件，或者是工作目录在所属项目里的开发工具。
     static func processUsers(path: String, project: String?, records: [SweepOpenPath]) -> [SweepProcessUser] {
+        processUsers(
+            path: SweepPath.Parts(path), project: project.map(SweepPath.Parts.init), records: preparedOpenPaths(records)
+        )
+    }
+
+    static func processUsers(
+        path: SweepPath.Parts, project: SweepPath.Parts?, records: [PreparedOpenPath]
+    ) -> [SweepProcessUser] {
         var users: [SweepProcessUser] = []
         var seen = Set<Int32>()
         for record in records {
-            let direct = SweepPath.isInside(record.path, path)
-            var projectUse = false
-            if let project, record.isCwd, SweepPath.isInside(record.path, project) {
-                let command = record.command.lowercased()
-                projectUse = developmentCommands.contains(where: command.hasPrefix)
-            }
+            let direct = record.parts.isInside(path)
+            let projectUse = project.map { record.isCwd && record.isDevelopment && record.parts.isInside($0) } ?? false
             guard direct || projectUse else { continue }
             if seen.insert(record.pid).inserted {
                 users.append(SweepProcessUser(pid: record.pid, command: record.command))
@@ -350,5 +418,46 @@ public enum SweepScanner {
             }
         }
         return users
+    }
+}
+
+/// 一轮扫描内的 Git 索引。轮次结束就丢掉，不挂在长寿命的 `SweepProbes` 上。
+struct ScanGitCache {
+    private struct Entry {
+        var answer: SweepGitAnswer?
+        var folded: [String] = []
+    }
+
+    var probes: SweepProbes
+    private var indexes: [String: Entry] = [:]
+
+    mutating func answer(repository: String, relative: String) -> SweepGitAnswer {
+        guard probes.gitIndex != nil else {
+            return probes.gitTracked(repository, relative)
+        }
+        if indexes[repository] == nil {
+            switch probes.gitIndex?(repository) ?? .failed {
+            case .missing:
+                indexes[repository] = Entry(answer: .missing)
+            case .failed:
+                indexes[repository] = Entry(answer: .failed)
+            case .files(let files):
+                indexes[repository] = Entry(folded: files.map(Self.fold))
+            }
+        }
+        guard let entry = indexes[repository] else { return .failed }
+        if let answer = entry.answer { return answer }
+        return covers(Self.fold(relative), entry.folded) ? .tracked : .untracked
+    }
+
+    /// 大小写和 Unicode 归一化后再比，避免只是大小写不同的已跟踪路径被当成未跟踪。
+    private static func fold(_ value: String) -> String {
+        value.precomposedStringWithCanonicalMapping.lowercased()
+    }
+
+    private func covers(_ relative: String, _ files: [String]) -> Bool {
+        if relative == "." || relative.isEmpty { return !files.isEmpty }
+        let prefix = relative + "/"
+        return files.contains { $0 == relative || $0.hasPrefix(prefix) }
     }
 }

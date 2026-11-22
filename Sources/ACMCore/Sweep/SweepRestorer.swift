@@ -70,9 +70,11 @@ public enum SweepRestorer {
             } else if SweepFS.lstat(original) != nil {
                 outcome.status = .blocked
                 outcome.reason = "原路径已有内容，恢复不会覆盖。"
+                outcome.recoveryPath = destination
             } else if !matches(expected, stage: receipt.stage, id: id) {
                 outcome.status = .blocked
                 outcome.reason = "暂存内容已发生变化。"
+                outcome.recoveryPath = destination
             }
             outcomes.append(outcome)
         }
@@ -119,9 +121,21 @@ public enum SweepRestorer {
                         try SweepJournalRecord(event: "restored", id: id).line(), to: fd, what: "无法更新回执"
                     )
                 } catch {
+                    let staged = receipt.stage + "/" + id
+                    if SweepFS.lstat(staged) != nil {
+                        outcomes[index].recoveryPath = staged
+                    }
                     if outcomes[index].status == .restored {
                         outcomes[index].status = .restoredReceiptFailed
                         outcomes[index].reason = "内容已恢复，回执更新失败。"
+                        for later in outcomes.indices where later > index && outcomes[later].status == .ready {
+                            outcomes[later].status = .notAttempted
+                            outcomes[later].reason = "回执没能更新，后面的项目没有执行。"
+                            let laterStaged = receipt.stage + "/" + outcomes[later].id
+                            if SweepFS.lstat(laterStaged) != nil {
+                                outcomes[later].recoveryPath = laterStaged
+                            }
+                        }
                         break
                     }
                     outcomes[index].status = .blocked
@@ -179,6 +193,41 @@ public enum SweepRestorer {
             ))
         }
         return runs.sorted { ($0.createdAt, $0.runID) > ($1.createdAt, $1.runID) }
+    }
+
+    /// 后台一次性读回执，并列出这些文件夹里的永久删除暂存。
+    public static func recoveryIndex(env: HostEnvironment, folders: [String]) -> SweepRecoveryIndex {
+        let runs = pendingRuns(env: env)
+        var residue: [String: [SweepStagingResidue]] = [:]
+        for folder in folders {
+            let found = stagingResidue(root: folder, runs: runs)
+            if !found.isEmpty { residue[folder] = found }
+        }
+        return SweepRecoveryIndex(runs: runs, residue: residue)
+    }
+
+    /// 扫描根里 `.acm-sweep-staging` 下还在的目录。软链不跟随。
+    public static func stagingResidue(root: String, env: HostEnvironment) -> [SweepStagingResidue] {
+        stagingResidue(root: root, runs: pendingRuns(env: env))
+    }
+
+    /// 只看磁盘上的暂存目录，不读回执。只读截图模式用。
+    public static func stagingResidueOnDisk(root: String) -> [SweepStagingResidue] {
+        stagingResidue(root: root, runs: [])
+    }
+
+    static func stagingResidue(root: String, runs: [SweepPendingRun]) -> [SweepStagingResidue] {
+        let base = root + "/" + SweepState.stagingName
+        guard let info = SweepFS.lstat(base), SweepFS.isDirectory(info), !SweepFS.isSymlink(info),
+              let listing = try? SweepFS.list(base)
+        else { return [] }
+        let matched = runs.filter { $0.root == root }
+        return listing.names.compactMap { name in
+            let path = base + "/" + name
+            guard let info = SweepFS.lstat(path), SweepFS.isDirectory(info), !SweepFS.isSymlink(info) else { return nil }
+            let runID = name.hasPrefix(SweepState.stagePrefix) ? String(name.dropFirst(SweepState.stagePrefix.count)) : name
+            return SweepStagingResidue(id: name, path: path, run: matched.first { $0.runID == runID })
+        }
     }
 
     /// 暂存目录里的这一项是否还和移走时一模一样。读不出来也算不一样。

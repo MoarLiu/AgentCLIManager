@@ -14,7 +14,7 @@ enum SweepRecognizer {
         ".config", ".buildsweep", ".Trash", ".buildsweep-staging", SweepState.stagingName,
         "Library", "Applications", "src", "Sources", "Tests", "tests",
         "fixtures", "assets", "Resources", "resources", "design", "docs",
-        "data", ".data", "backup", "backups", "node_modules",
+        "data", ".data", "backup", "backups",
     ]
 
     static let manifests = ["Package.swift", "package.json", "pyproject.toml", "requirements.txt"]

@@ -19,6 +19,8 @@ struct AgentCLIManagerApp: App {
             CommandGroup(after: .toolbar) {
                 Button("重新扫描") { model.rescanCurrent() }
                     .keyboardShortcut("r")
+                    .disabled(model.workspace == .sweep
+                              && (model.sweep.interactionLocked || model.sweep.selectedFolder == nil))
             }
         }
     }
@@ -109,10 +111,11 @@ enum Snapshotter {
             if options.selectAll { model.sweep.selectAllCleanup() }
             let demos = (options.demo ?? "").split(separator: ",").map(String.init)
             if demos.contains("pending") { model.sweep.showDemoPending() }
+            if demos.contains("residue") { model.sweep.showDemoResidue() }
         }
         switch options.sheet {
         case "confirm":
-            if let group = model.selectedGroup { model.preparePlan(for: group) }
+            if let group = model.selectedGroup { await model.preparePlan(for: group) }
         case "install":
             model.showInstall = true
         case "recovery":
@@ -129,6 +132,10 @@ enum Snapshotter {
             model.sweep.showRecovery = true
         default:
             break
+        }
+        if options.sweep != nil,
+           (options.demo ?? "").split(separator: ",").contains("restore-failed") {
+            model.sweep.showDemoRestoreFailure()
         }
         if let appearance = options.appearance {
             let value = NSAppearance(named: appearance == "dark" ? .darkAqua : .aqua)

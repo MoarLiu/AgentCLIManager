@@ -3,11 +3,22 @@ import AppKit
 import Observation
 import SwiftUI
 
+/// 目录清单和加载时丢掉的用户声明。
+struct LoadedCatalog: Sendable {
+    var catalog: Catalog
+    var warnings: [String]
+
+    init(_ catalog: Catalog, warnings: [String] = []) {
+        self.catalog = catalog
+        self.warnings = warnings
+    }
+}
+
 /// 所有外部输入集中在这里；测试必须显式提供每一项，避免意外访问真实家目录。
 @MainActor
 struct AppDependencies {
     var environment: () -> HostEnvironment
-    var catalog: (HostEnvironment) -> Catalog
+    var catalog: (HostEnvironment) -> LoadedCatalog
     var scan: @Sendable (ScanOptions) async -> ScanReport
     var measure: @Sendable ([String]) -> AsyncStream<(String, SizeResult?)>
     var remover: any Remover
@@ -19,7 +30,10 @@ struct AppDependencies {
     static var live: AppDependencies {
         AppDependencies(
             environment: HostEnvironment.live,
-            catalog: Catalog.loadAll,
+            catalog: { env in
+                let loaded = Catalog.loadAllReporting(env: env)
+                return LoadedCatalog(loaded.catalog, warnings: loaded.warnings)
+            },
             scan: { options in
                 await Task.detached(priority: .userInitiated) { ToolScanner.scan(options) }.value
             },
@@ -73,6 +87,8 @@ final class AppModel {
 
     var report: ScanReport?
     var isScanning = false
+    /// 正在后台核对卸载目标有没有进程占用。
+    private(set) var isPreparingPlan = false
     private var measuringJobs = 0
     var isMeasuring: Bool { measuringJobs > 0 }
 
@@ -164,8 +180,9 @@ final class AppModel {
 
     init(snapshot: SnapshotOptions?, dependencies: AppDependencies) {
         let env = dependencies.environment()
+        let loaded = dependencies.catalog(env)
         self.env = env
-        self.catalog = dependencies.catalog(env)
+        self.catalog = loaded.catalog
         self.snapshot = snapshot
         self.dependencies = dependencies
         self.processProbe = dependencies.processProbe
@@ -174,6 +191,10 @@ final class AppModel {
         sweep.onMessage = { [weak self] text, isError in
             self?.banner = text
             self?.bannerIsError = isError
+        }
+        if !loaded.warnings.isEmpty {
+            banner = loaded.warnings.joined(separator: "；")
+            bannerIsError = true
         }
     }
 
@@ -199,10 +220,14 @@ final class AppModel {
         let current = generation
 
         let env = dependencies.environment()
-        let catalog = dependencies.catalog(env)
+        let loaded = dependencies.catalog(env)
         self.env = env
-        self.catalog = catalog
+        self.catalog = loaded.catalog
         sweep.env = env
+        if !loaded.warnings.isEmpty {
+            banner = loaded.warnings.joined(separator: "；")
+            bannerIsError = true
+        }
         let options = ScanOptions(env: env, catalog: catalog, processProbe: processProbe)
         let scanned = await dependencies.scan(options)
         guard current == generation else { return }
@@ -434,11 +459,14 @@ final class AppModel {
         }
     }
 
-    /// 生成计划前重新查一遍进程：扫描到现在可能已经过了很久。
-    func preparePlan(for group: ToolGroup) {
-        guard !isExecuting, !isUndoing, !isScanning else { return }
+    /// 生成计划前重新查一遍进程：扫描到现在可能已经过了很久。查进程在后台进行。
+    func preparePlan(for group: ToolGroup) async {
+        guard !isExecuting, !isUndoing, !isScanning, !isPreparingPlan else { return }
         planNotice = nil
-        let pids = runningPIDs(for: group)
+        isPreparingPlan = true
+        defer { isPreparingPlan = false }
+        let pids = await runningPIDsAsync(for: group)
+        guard !isExecuting, !isUndoing, !isScanning else { return }
         let fresh = groupWithRunningPIDs(group, pids: pids)
         plannedGroup = fresh
         let newPlan = makePlan(for: fresh, selected: selection[group.id] ?? [])
@@ -564,10 +592,6 @@ final class AppModel {
     }
 
     // MARK: - 执行前复查与回执持久化
-
-    private func runningPIDs(for group: ToolGroup) -> [Int32] {
-        ToolScanner.runningPIDs(for: group, in: processProbe())
-    }
 
     private func runningPIDsAsync(for group: ToolGroup) async -> [Int32] {
         let probe = processProbe

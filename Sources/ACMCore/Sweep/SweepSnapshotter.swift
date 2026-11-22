@@ -12,6 +12,32 @@ import Foundation
 ///
 /// 摘要的写法与 BuildSweep 逐字节一致（同样的条目顺序和 JSON 写法），
 /// 这样两边能直接对拍。
+/// 一轮扫描里按文件身份记住安装包摘要。只在扫描阶段复用，移动后的复核不走这里。
+final class SweepContentHashCache: @unchecked Sendable {
+    struct Key: Hashable {
+        var device: Int64
+        var inode: UInt64
+        var size: Int64
+        var mtimeNs: Int64
+        var ctimeNs: Int64
+    }
+
+    private let lock = NSLock()
+    private var values: [Key: String] = [:]
+
+    func value(for key: Key) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return values[key]
+    }
+
+    func store(_ value: String, for key: Key) {
+        lock.lock()
+        defer { lock.unlock() }
+        values[key] = value
+    }
+}
+
 public enum SweepSnapshotter {
 
     static let noise: Set<String> = [".DS_Store", ".localized"]
@@ -21,6 +47,16 @@ public enum SweepSnapshotter {
         relative: String,
         maxEntries: Int = 500_000,
         contentHash: Bool = false
+    ) throws -> SweepSnapshot {
+        try snapshot(root: root, relative: relative, maxEntries: maxEntries, contentHash: contentHash, hashes: nil)
+    }
+
+    static func snapshot(
+        root: String,
+        relative: String,
+        maxEntries: Int = 500_000,
+        contentHash: Bool = false,
+        hashes: SweepContentHashCache?
     ) throws -> SweepSnapshot {
         guard SweepPath.realpath(root) == root else {
             throw SweepError("unsafe_path", "目标或其父目录包含符号链接，或超出扫描范围。")
@@ -67,7 +103,17 @@ public enum SweepSnapshotter {
             contentSHA256: nil
         )
         if contentHash, !isDirectory {
-            result.contentSHA256 = try digestFile(parentFD: parentFD, name: leaf)
+            let key = SweepContentHashCache.Key(
+                device: Int64(initial.st_dev), inode: UInt64(initial.st_ino), size: Int64(initial.st_size),
+                mtimeNs: SweepFS.mtimeNs(initial), ctimeNs: SweepFS.ctimeNs(initial)
+            )
+            if let cached = hashes?.value(for: key) {
+                result.contentSHA256 = cached
+            } else {
+                let digest = try digestFile(parentFD: parentFD, name: leaf)
+                hashes?.store(digest, for: key)
+                result.contentSHA256 = digest
+            }
         }
 
         var final = stat()

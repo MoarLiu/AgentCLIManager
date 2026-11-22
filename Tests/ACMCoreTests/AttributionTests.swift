@@ -387,4 +387,18 @@ import Testing
         #expect(testCatalog.claim(for: "/h/.grok/sessions/x", home: "/h")?.declared.kind == .data)
         #expect(testCatalog.claim(for: "/h/.grokbot", home: "/h") == nil)
     }
+
+    @Test func userCatalogDropsPathsThatFailPathSafety() throws {
+        let fx = try Fixture()
+        fx.file("Library/Application Support/AgentCLIManager/catalog.json", """
+        {"schemaVersion":1,"products":[{"id":"extra","name":"Extra","kind":"cli","binaries":["extra"],"paths":[
+          {"path":"~/.ssh","kind":"data"},
+          {"path":"~/.extra-tool","kind":"data"}
+        ]}]}
+        """)
+        let loaded = Catalog.loadAllReporting(env: fx.env())
+        let product = try #require(loaded.catalog.product(id: "extra"))
+        #expect(product.paths?.map(\.path) == ["~/.extra-tool"])
+        #expect(loaded.warnings.contains { $0.contains("~/.ssh") })
+    }
 }

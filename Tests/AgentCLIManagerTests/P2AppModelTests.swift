@@ -153,7 +153,7 @@ import Testing
         let env = HostEnvironment(home: fixture.home, systemBinDirs: [], includeLibrary: false)
         let model = AppModel(snapshot: SnapshotOptions(path: fixture.root.appendingPathComponent("demo.png").path),
                              dependencies: AppDependencies(
-            environment: { env }, catalog: { _ in Catalog(products: []) },
+            environment: { env }, catalog: { _ in LoadedCatalog(Catalog(products: [])) },
             scan: { _ in ScanReport(scannedAt: Date(), groups: []) },
             measure: { _ in AsyncStream { $0.finish() } },
             remover: fixture.remover, processProbe: { [] },
@@ -411,10 +411,10 @@ import Testing
         let group = ToolGroup(id: "confirm", name: "confirm", section: .installed)
         model.report = ScanReport(scannedAt: Date(), groups: [group])
         model.selectedGroupID = group.id
-        model.preparePlan(for: group)
+        await model.preparePlan(for: group)
         let first = model.planConfirmationToken
         #expect(first != nil)
-        model.preparePlan(for: group)
+        await model.preparePlan(for: group)
         #expect(model.planConfirmationToken != nil)
         #expect(model.planConfirmationToken != first)
     }
@@ -554,7 +554,7 @@ private final class GUIFixture: @unchecked Sendable {
     ) -> AppModel {
         let env = HostEnvironment(home: home, systemBinDirs: [], includeLibrary: false)
         return AppModel(snapshot: nil, dependencies: AppDependencies(
-            environment: { env }, catalog: { _ in Catalog(products: []) },
+            environment: { env }, catalog: { _ in LoadedCatalog(Catalog(products: [])) },
             scan: scan ?? { _ in ScanReport(scannedAt: Date(), groups: []) },
             measure: measure,
             remover: remover, processProbe: { [] },
@@ -582,7 +582,9 @@ extension SweepDependencies {
         SweepDependencies(
             probes: SweepProbes(openPaths: { [] }, gitTracked: { _, _ in .untracked }),
             loadFolders: { _ in [] },
-            saveFolders: { _, _ in }
+            saveFolders: { _, _ in },
+            loadExcludes: { _ in [:] },
+            saveExcludes: { _, _ in }
         )
     }
 }

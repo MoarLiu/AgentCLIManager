@@ -45,8 +45,9 @@ let usage = """
   --json / --sizes / --verbose   scan 的输出形式；--json 也用于 catalog
 
 项目清理（sweep）：
-  scan 不移动、不删除任何东西。目录必须明确给出；家目录本身、家目录的隐藏目录、
-  ~/Library 和系统目录都不接受。候选项分四种：cleanup（有生成依据、闲置、没被占用）、
+  scan 不移动、不删除任何东西。目录必须明确给出，不能是空路径。家目录本身、家目录的隐藏目录、
+  ~/Library、系统目录，以及 /opt、/opt/homebrew、/private/etc、/private/tftpboot、/cores 都不接受；
+  /opt 下面的具体项目目录可以。候选项分四种：cleanup（有生成依据、闲置、没被占用）、
   keep（最新版本的安装包）、review（证据不够或最近还在写）、blocked（有保护条件拦着）。
   --out <文件>        把计划另存为新文件，供 items / inspect 查看；已有同名文件时拒绝
   --idle-hours <小时> 至少闲置这么久才算 cleanup，默认 24；0 表示不看闲置时间
@@ -141,7 +142,12 @@ if case .sweep(let sweep) = parsed.command {
     exit(runSweep(sweep, env: env))
 }
 
-let catalog = Catalog.loadAll(env: env)
+let loadedCatalog = Catalog.loadAllReporting(env: env)
+let catalog = loadedCatalog.catalog
+if !loadedCatalog.warnings.isEmpty {
+    let text = loadedCatalog.warnings.joined(separator: "\n") + "\n"
+    FileHandle.standardError.write(Data(text.utf8))
+}
 
 // MARK: - 小工具
 

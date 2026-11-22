@@ -152,10 +152,48 @@ public struct Catalog: Codable, Sendable {
         return try? decode(data)
     }
 
-    public static func loadAll(env: HostEnvironment) -> Catalog {
+    public struct LoadResult: Sendable {
+        public var catalog: Catalog
+        public var warnings: [String]
+    }
+
+    /// 内置清单保持原样。用户清单里过不了 `PathSafety` 的路径声明会被丢掉，并记一条警告。
+    public static func loadAllReporting(env: HostEnvironment) -> LoadResult {
+        var warnings: [String] = []
         var parts = [loadBuiltin()]
-        if let user = loadUserOverride(home: env.home) { parts.append(user) }
-        return merge(parts)
+        if let user = loadUserOverride(home: env.home) {
+            parts.append(droppingUnsafePaths(user, env: env, warnings: &warnings))
+        }
+        return LoadResult(catalog: merge(parts), warnings: warnings)
+    }
+
+    public static func loadAll(env: HostEnvironment) -> Catalog {
+        loadAllReporting(env: env).catalog
+    }
+
+    static func droppingUnsafePaths(
+        _ catalog: Catalog, env: HostEnvironment, warnings: inout [String]
+    ) -> Catalog {
+        var products = catalog.products
+        for index in products.indices {
+            guard let paths = products[index].paths else { continue }
+            var kept: [CatalogPath] = []
+            for declared in paths {
+                let expanded = PathUtil.expand(declared.path, home: env.home)
+                let decision = PathSafety.check(expanded, env: env)
+                if decision.allowed {
+                    kept.append(declared)
+                } else {
+                    warnings.append(
+                        "已忽略 \(products[index].name) 的 \(declared.path)：\(decision.reason ?? "不在可管理范围内")"
+                    )
+                }
+            }
+            products[index].paths = kept
+        }
+        var cleaned = catalog
+        cleaned.products = products
+        return cleaned
     }
 
     public func product(id: String) -> CatalogProduct? {

@@ -277,6 +277,15 @@ struct SweepResultSheet: View {
                 .foregroundStyle(Color.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if sweep.restoreReceipt == result.receipt {
+                if let error = sweep.restoreError {
+                    restoreError(error)
+                }
+                if !sweep.restoreFailures.isEmpty {
+                    restoreFailures(sweep.restoreFailures)
+                }
+            }
+
             HStack(spacing: 10) {
                 if sweep.isRestoring {
                     ProgressView().controlSize(.small)
@@ -288,8 +297,8 @@ struct SweepResultSheet: View {
                 if let run = sweep.resultRun {
                     Button("放回原处") {
                         Task {
-                            await sweep.restore(run)
-                            sweep.result = nil
+                            let complete = await sweep.restore(run)
+                            if complete { sweep.result = nil }
                         }
                     }
                     .buttonStyle(.acmSecondary)
@@ -325,7 +334,9 @@ struct SweepResultSheet: View {
 
     private var title: String {
         let rest = stranded.count + untouched.count
-        guard !done.isEmpty else { return "什么都没有清理" }
+        guard !done.isEmpty else {
+            return stranded.isEmpty ? "什么都没有清理" : "清理停在半路"
+        }
         let verb = permanent ? "已永久删除 \(done.count) 项" : "已把 \(done.count) 项移到废纸篓"
         return rest == 0 ? verb : verb + "，\(rest) 项没有清理"
     }
@@ -345,6 +356,46 @@ struct SweepResultSheet: View {
             return "永久删除不经过废纸篓。"
         }
         return "空间要等清空废纸篓后才会释放；本 App 不会替你清空。"
+    }
+
+    private func restoreFailures(_ failures: [SweepOutcome]) -> some View {
+        let skipped = failures.filter { $0.status == .notAttempted }.count
+        return FlowSection(title: "没能放回", detail: skipped > 0 ? "另有 \(skipped) 项未执行" : "还在暂存位置",
+                           tone: .acmCaution, trailing: "\(failures.count) 项") {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(failures) { outcome in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(outcome.path)
+                            .font(.acmMonoNum)
+                            .foregroundStyle(Color.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(outcome.reason ?? outcome.status.displayName)
+                            .font(.acmCaption)
+                            .foregroundStyle(Color.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let recovery = outcome.recoveryPath {
+                            Text("现在在 " + model.show(recovery))
+                                .font(.acmCaption)
+                                .foregroundStyle(Color.textSecondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .help(recovery)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func restoreError(_ text: String) -> some View {
+        FlowSection(title: "没能放回", detail: "这次没有逐项执行", tone: .acmCaution) {
+            Text(text)
+                .font(.acmCallout)
+                .foregroundStyle(Color.textSecondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -403,6 +454,36 @@ struct SweepRecoverySheet: View {
                                     }
                                     .buttonStyle(.acmCompact)
                                     .disabled(sweep.isBusy || model.snapshot != nil)
+                                }
+                                if sweep.restoreRunID == run.runID, let error = sweep.restoreError {
+                                    Text(error)
+                                        .font(.acmCallout)
+                                        .foregroundStyle(Color.acmCaution)
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                if sweep.restoreRunID == run.runID, !sweep.restoreFailures.isEmpty {
+                                    ForEach(sweep.restoreFailures) { outcome in
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(outcome.path)
+                                                .font(.acmMonoNum)
+                                                .foregroundStyle(Color.textPrimary)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                            Text(outcome.reason ?? outcome.status.displayName)
+                                                .font(.acmCaption)
+                                                .foregroundStyle(Color.textSecondary)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                            if let recovery = outcome.recoveryPath {
+                                                Text("现在在 " + model.show(recovery))
+                                                    .font(.acmCaption)
+                                                    .foregroundStyle(Color.textSecondary)
+                                                    .lineLimit(1)
+                                                    .truncationMode(.middle)
+                                                    .help(recovery)
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

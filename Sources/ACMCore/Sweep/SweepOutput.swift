@@ -183,6 +183,8 @@ public enum SweepOutput {
         if result.executed {
             let done = count(result.items, result.mode == .permanent ? .deleted : .trashed)
             lines.append("已\(result.mode == .permanent ? "永久删除" : "移到废纸篓") \(done) 项，共 \(result.items.count) 项")
+            let skipped = count(result.items, .notAttempted)
+            if skipped > 0 { lines.append("另有 \(skipped) 项未执行") }
         } else if requested {
             lines.append("没有可以执行的项目，什么都没动。")
         } else {
@@ -216,6 +218,8 @@ public enum SweepOutput {
         var lines = ["扫描目录  \(quoted(result.root))"]
         if result.executed {
             lines.append("已放回 \(count(result.items, .restored)) 项，共 \(result.items.count) 项")
+            let skipped = count(result.items, .notAttempted)
+            if skipped > 0 { lines.append("另有 \(skipped) 项未执行") }
         } else if result.items.isEmpty {
             lines.append("这份回执里没有还能放回的内容。")
         } else if requested {

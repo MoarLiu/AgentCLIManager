@@ -22,8 +22,17 @@ public enum SweepGitAnswer: Sendable, Equatable {
     case untracked
     /// 有文件被 Git 跟踪着
     case tracked
-    /// 问不出来（没有 git、超时、仓库读不了）。按「可能被跟踪」处理。
+    /// 问不出来（超时、仓库读不了）。按「可能被跟踪」处理。
     case failed
+    /// 本机没有可用的 git。同样不放行，但原因和「仓库读不了」分开。
+    case missing
+}
+
+/// 一次 `git ls-files -z` 的结果。扫描一轮里按仓库缓存；执行前的复核不用它。
+public enum SweepGitIndex: Sendable, Equatable {
+    case files([String])
+    case failed
+    case missing
 }
 
 /// 扫描要向外部问的两件事。测试里换成假的，引擎本身不启动任何子进程。
@@ -32,18 +41,26 @@ public struct SweepProbes: Sendable {
     public var openPaths: @Sendable () throws -> [SweepOpenPath]
     /// `repository` 里 `relative` 这个路径下有没有被跟踪的文件。
     public var gitTracked: @Sendable (_ repository: String, _ relative: String) -> SweepGitAnswer
+    /// 列出仓库里全部已跟踪路径。只给一轮扫描做内存查询；不提供时扫描退回逐项 `gitTracked`。
+    public var gitIndex: (@Sendable (String) -> SweepGitIndex)?
 
     public init(
         openPaths: @escaping @Sendable () throws -> [SweepOpenPath],
-        gitTracked: @escaping @Sendable (_ repository: String, _ relative: String) -> SweepGitAnswer
+        gitTracked: @escaping @Sendable (_ repository: String, _ relative: String) -> SweepGitAnswer,
+        gitIndex: (@Sendable (String) -> SweepGitIndex)? = nil
     ) {
         self.openPaths = openPaths
         self.gitTracked = gitTracked
+        self.gitIndex = gitIndex
     }
 
     public static var live: SweepProbes {
         let git = LiveGit()
-        return SweepProbes(openPaths: LiveOpenPaths.probe, gitTracked: { git.tracked($0, $1) })
+        return SweepProbes(
+            openPaths: LiveOpenPaths.probe,
+            gitTracked: { git.tracked($0, $1) },
+            gitIndex: { git.index($0) }
+        )
     }
 }
 
@@ -128,20 +145,41 @@ final class LiveGit: @unchecked Sendable {
     private var executable: String?
 
     func tracked(_ repository: String, _ relative: String) -> SweepGitAnswer {
-        guard let git = path() else { return .failed }
-        // 待查的目录可能是从网上下载的仓库：关掉会执行外部程序的配置项，
-        // 不取可选锁，也不让调用方环境里的 GIT_DIR 之类把查询引到别的仓库去。
+        guard let result = run(repository, ["ls-files", "-z", "--", relative]) else {
+            return path() == nil ? .missing : .failed
+        }
+        guard result.status == 0 else { return .failed }
+        return result.stdout.isEmpty ? .untracked : .tracked
+    }
+
+    /// 整个索引，路径相对于仓库根。调用方按扫描轮次自己缓存。
+    func index(_ repository: String) -> SweepGitIndex {
+        guard let result = run(repository, ["ls-files", "-z"]) else {
+            return path() == nil ? .missing : .failed
+        }
+        guard result.status == 0 else { return .failed }
+        var files: [String] = []
+        for slice in result.stdout.split(separator: 0, omittingEmptySubsequences: true) {
+            guard let file = String(bytes: slice, encoding: .utf8) else { return .failed }
+            files.append(file)
+        }
+        return .files(files)
+    }
+
+    /// 待查的目录可能是从网上下载的仓库：关掉会执行外部程序的配置项，
+    /// 不取可选锁，也不让调用方环境里的 GIT_DIR 之类把查询引到别的仓库去。
+    private func run(_ repository: String, _ arguments: [String]) -> SweepSubprocess.Output? {
+        guard let git = path() else { return nil }
         var environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("GIT_") }
         environment["GIT_OPTIONAL_LOCKS"] = "0"
-        guard let result = SweepSubprocess.run(
+        return SweepSubprocess.run(
             git,
             [
                 "--literal-pathspecs", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-                "-C", repository, "ls-files", "-z", "--", relative,
-            ],
+                "-C", repository,
+            ] + arguments,
             environment: environment, timeout: 30, keepStderr: false
-        ), result.status == 0 else { return .failed }
-        return result.stdout.isEmpty ? .untracked : .tracked
+        )
     }
 
     private func path() -> String? {

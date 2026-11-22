@@ -488,6 +488,49 @@ run "sweep scan 假家目录之外 退出码 2" 2 sweep scan "$TMPROOT/outside-h
 expect_contains "sweep scan：演练不出假家目录" "必须在该目录之内"
 run "sweep scan 目录不存在 退出码 2" 2 sweep scan "$SWEEP_HOME/Projects/missing" --home "$SWEEP_HOME"
 
+# 空路径和过宽扫描根：必须在开始扫描之前拒绝。
+run "sweep scan 空路径 退出码 2" 2 sweep scan "" --home "$SWEEP_HOME"
+expect_contains "sweep scan 空路径：说明路径不能为空" "路径不能为空"
+run "sweep scan --exclude 空路径 退出码 2" 2 sweep scan "$SWEEP_WS" --home "$SWEEP_HOME" --exclude ""
+expect_contains "sweep scan --exclude 空路径：说明路径不能为空" "路径不能为空"
+run "sweep scan --out 空白路径 退出码 2" 2 sweep scan "$SWEEP_HOME/Projects/missing" --home "$SWEEP_HOME" --out " "
+expect_contains "sweep scan --out 空白路径：扫描前拒绝" "路径不能为空"
+if [ -d /opt ]; then
+    run "sweep scan /opt 退出码 2" 2 sweep scan /opt
+    expect_contains "sweep scan /opt：拒绝包管理器前缀" "包管理器前缀"
+fi
+run "sweep scan /private/etc 退出码 2" 2 sweep scan /private/etc
+expect_contains "sweep scan /private/etc：拒绝系统目录" "系统目录"
+if [ -d /cores ]; then
+    run "sweep scan /cores 退出码 2" 2 sweep scan /cores
+    expect_contains "sweep scan /cores：拒绝系统目录" "系统目录"
+fi
+
+# 读不到的目录要先排除；排除后能出结论。
+SWEEP_BLOCKED_WS="$SWEEP_HOME/Projects/blocked"
+mkdir -p "$SWEEP_BLOCKED_WS/.build/artifacts" "$SWEEP_BLOCKED_WS/secret"
+printf '// swift-tools-version: 6.0\n' > "$SWEEP_BLOCKED_WS/Package.swift"
+printf '{}' > "$SWEEP_BLOCKED_WS/.build/workspace-state.json"
+chmod 000 "$SWEEP_BLOCKED_WS/secret"
+run "sweep scan 读不到目录 退出码 1" 1 sweep scan "$SWEEP_BLOCKED_WS" --home "$SWEEP_HOME" --idle-hours 0
+expect_contains "sweep scan 读不到目录：提示排除" "排除后重试"
+run "sweep scan 排除读不到目录" 0 sweep scan "$SWEEP_BLOCKED_WS" --home "$SWEEP_HOME" --idle-hours 0 \
+    --exclude "$SWEEP_BLOCKED_WS/secret"
+expect_contains "sweep scan 排除读不到目录：仍能列出缓存" "可清理 1 项"
+chmod 755 "$SWEEP_BLOCKED_WS/secret"
+
+# 永久删除中断留下的暂存：扫描只提示，不把它当成缓存。
+SWEEP_RESIDUE_WS="$SWEEP_HOME/Projects/residue"
+mkdir -p "$SWEEP_RESIDUE_WS/.build/artifacts" "$SWEEP_RESIDUE_WS/.acm-sweep-staging/ACM-Sweep-left/leftover"
+printf '// swift-tools-version: 6.0\n' > "$SWEEP_RESIDUE_WS/Package.swift"
+printf '{}' > "$SWEEP_RESIDUE_WS/.build/workspace-state.json"
+printf 'left' > "$SWEEP_RESIDUE_WS/.acm-sweep-staging/ACM-Sweep-left/leftover/a.o"
+run "sweep scan 暂存残留" 0 sweep scan "$SWEEP_RESIDUE_WS" --home "$SWEEP_HOME" --idle-hours 0
+expect_contains "sweep scan 暂存残留：明确提示" "未完成的永久删除暂存"
+run "sweep scan 暂存残留 --json" 0 sweep scan "$SWEEP_RESIDUE_WS" --home "$SWEEP_HOME" --idle-hours 0 --json
+sweep_json 'all(".acm-sweep-staging" not in x["path"] for x in d["data"]["items"])' \
+    && pass "sweep scan 暂存残留：不当作缓存" || fail "sweep scan 暂存残留：不当作缓存" "$OUT"
+
 # 用法错误；带 --json 时错误也是一个 JSON 对象。
 run "sweep 缺子命令 退出码 2" 2 sweep
 run "sweep scan 缺目录 --json 退出码 2" 2 sweep scan --json

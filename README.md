@@ -119,7 +119,7 @@ DMG 和 `SHA256SUMS` 输出到 `build/release/`。打包前自动扫描公开源
 发布文件使用 `.gitignore` 排除构建缓存、开发历史、内部审查报告、截图及签名私钥。
 公开前还需挂载 DMG，验证 App 签名、版本和启动行为。
 
-当前版本为 0.3.0（build 5），要求 macOS 14 或更新版本。当前安装包为 arm64，
+当前版本为 0.3.1（build 6），要求 macOS 14 或更新版本。当前安装包为 arm64，
 采用 ad-hoc 签名，尚未进行 Apple 公证，首次打开可能受到 Gatekeeper 拦截。
 
 界面调整时可以用截图模式检查，它不会动任何文件：
@@ -136,8 +136,8 @@ DMG 和 `SHA256SUMS` 输出到 `build/release/`。打包前自动扫描公开源
 
 `--sweep <文件夹>` 直接切到「项目清理」并扫描这个文件夹（不读写文件夹清单）；`--sweep-idle 24|168|0` 选闲置档位；
 `--select-all` 连旧版本安装包一起勾上；`--sheet` 可取 `sweep-confirm`、`sweep-permanent`、`sweep-result`、
-`sweep-result-permanent`、`sweep-recovery`；`--demo pending` 摆一批假的「可放回原处」。截图模式下执行和放回都被禁用，
-结果页和可放回内容是内存里的示意数据。
+`sweep-result-permanent`、`sweep-recovery`；`--demo pending` 摆一批假的「可放回原处」，`--demo residue` 从磁盘列出实际的
+永久删除暂存，`--demo restore-failed` 摆一条放回失败。截图模式下执行和放回都被禁用，结果页和可放回内容是内存里的示意数据。
 
 ## 命令行 `acm`
 
@@ -267,6 +267,14 @@ CLI 图标打进 app bundle，**运行时不联网取图**；没有对应文件�
 - **启动脚本只做保守静态检查**：仅对能完整识别的直接 `exec` 语句判断目标是否全部缺失；含动态目标、分支、函数或 here-document 的复杂脚本，不据此认定为损坏或残留。
 
 ## 验证情况
+
+### 0.3.1
+
+- 在 Apple Silicon 上使用 Xcode 27.2 与 Swift 6.4.2 验证。Debug 和 Release 测试覆盖路径护栏、排除清单、扫描与执行之间的进程和 Git 复查，以及中断和恢复失败的状态。
+- CLI 端到端验证覆盖参数、清理与恢复往返、永久删除和假家目录边界。BuildSweep 对照检查在同一棵临时目录树上比较候选项、结论、原因和指纹。
+- Release App 通过严格并发编译与签名验证。源码、App 和 DMG 暂存目录通过隐私检查。DMG 包含 arm64 App 与 `Applications` 快捷方式，发布页提供 SHA-256 校验文件。
+
+### 历史验收记录
 
 2026-11-18 使用 Xcode 27.2、Apple Swift 6.4.2、macOS 27.2 SDK 在 arm64 上验证，SwiftUI 与 Testing 宏插件由 Xcode 提供。
 

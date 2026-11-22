@@ -7,15 +7,38 @@ import Foundation
 /// 其余路径都是从目录里读出来的真实名字，写法本来就一致；放宽比较只会让边界判断变松。
 public enum SweepPath {
 
+    /// 预先拆好的路径。比较时不再分配。
+    struct Parts: Sendable, Hashable {
+        var values: [String]
+
+        init(_ path: String) {
+            values = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        }
+
+        /// 自己等于 `parent`，或者位于它之下。
+        func isInside(_ parent: Parts) -> Bool {
+            guard values.count >= parent.values.count else { return false }
+            for index in parent.values.indices where values[index] != parent.values[index] {
+                return false
+            }
+            return true
+        }
+    }
+
     static func components(_ path: String) -> [String] {
-        path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        Parts(path).values
     }
 
     /// `path` 等于 `parent` 或位于它之下。
     static func isInside(_ path: String, _ parent: String) -> Bool {
-        let p = components(path), q = components(parent)
-        guard p.count >= q.count else { return false }
-        return zip(p, q).allSatisfy { $0 == $1 }
+        Parts(path).isInside(Parts(parent))
+    }
+
+    /// 命令行拿到的路径不能是空的，也不能只含空白。空字符串以前会被拼成当前目录。
+    public static func rejectBlank(_ value: String) throws {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw SweepError("usage", "路径不能为空。")
+        }
     }
 
     /// 相对于扫描根的写法；根本身写成 `.`。调用方保证 `path` 在 `root` 之内。
@@ -110,10 +133,18 @@ public enum SweepPath {
         if broad.contains(root) || ancestors(of: home).contains(root) || isMountPoint(root) {
             throw SweepError("broad_root", "请选择 Downloads 或某个具体项目目录。")
         }
-        for system in ["/System", "/Library", "/Applications", "/usr", "/bin", "/sbin", "/dev"] {
-            if isInside(root, system) {
-                throw SweepError("system_root", "系统目录不在清理范围内。")
-            }
+        if isPackageManagerRoot(root) {
+            throw SweepError("broad_root", "请选择具体项目目录，不要选包管理器前缀。")
+        }
+        var systems = [
+            "/System", "/Library", "/Applications", "/usr", "/bin", "/sbin", "/dev",
+            "/cores", "/etc", "/private/etc", "/tftpboot", "/private/tftpboot",
+        ]
+        for name in ["/cores", "/etc", "/private/etc", "/tftpboot", "/private/tftpboot"] {
+            if let resolved = realpath(name) { systems.append(resolved) }
+        }
+        for system in systems where isInside(root, system) {
+            throw SweepError("system_root", "系统目录不在清理范围内。")
         }
         // 家目录的点条目和 ~/Library 是「工具」模块的范围：那里的 node_modules
         // 多半是某个已装工具的程序本体，不是能重新安装的项目依赖。
@@ -131,6 +162,15 @@ public enum SweepPath {
             throw SweepError.posix("无法读取扫描根目录", errno)
         }
         return [UInt64(truncatingIfNeeded: Int64(info.st_dev)), UInt64(info.st_ino)]
+    }
+
+    /// `/opt` 本身，以及 Homebrew 前缀（含它下面的子目录）。`/opt/work/…` 这种具体项目仍允许。
+    private static func isPackageManagerRoot(_ root: String) -> Bool {
+        if root == "/opt" { return true }
+        if let opt = realpath("/opt"), root == opt { return true }
+        if isInside(root, "/opt/homebrew") { return true }
+        if let brew = realpath("/opt/homebrew"), isInside(root, brew) { return true }
+        return false
     }
 
     private static func isMountPoint(_ path: String) -> Bool {
@@ -224,6 +264,8 @@ enum SweepFS {
             throw SweepError.posix("无法读取目录", code)
         }
         defer { closedir(handle) }
+        // `dup` 和原描述符共享偏移。调用方可能已经读过这个目录，这里先回到开头。
+        rewinddir(handle)
         return try read(handle)
     }
 

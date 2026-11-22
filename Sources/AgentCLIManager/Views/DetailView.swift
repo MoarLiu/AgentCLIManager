@@ -260,11 +260,16 @@ struct DetailView: View {
             .fixedSize()
             .help("批量调整勾选")
 
+            if model.isPreparingPlan {
+                ProgressView()
+                    .controlSize(.small)
+                    .help("正在核对有没有进程正在使用")
+            }
             Button("卸载") {
-                model.preparePlan(for: group)
+                Task { await model.preparePlan(for: group) }
             }
             .buttonStyle(.acmPrimary)
-            .disabled(outer.isEmpty || model.isBusy || model.isScanning)
+            .disabled(outer.isEmpty || model.isBusy || model.isScanning || model.isPreparingPlan)
             .help("打开卸载确认单，核对后才会移走所选条目")
             .layoutPriority(1)
         }

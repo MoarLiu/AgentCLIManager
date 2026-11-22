@@ -31,7 +31,7 @@ extension SweepStatus {
     var hint: String {
         switch self {
         case .cleanup: return "有生成依据、闲置、没有进程占用"
-        case .review: return "证据不够或最近还在写，本 App 不会动"
+        case .review: return "证据不够或最近还在写，本版不能在这里清理"
         case .keep: return "最新版本的安装包"
         case .blocked: return "有保护条件拦着，本 App 不会动"
         }
@@ -147,7 +147,7 @@ struct SweepFolderList: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(model.snapshot != nil)
+                .disabled(model.snapshot != nil || sweep.interactionLocked)
                 .padding(.top, 4)
             }
             .padding(.horizontal, 8)
@@ -200,7 +200,7 @@ struct SweepFolderRow: View {
         .contextMenu {
             Button("在 Finder 中显示") { model.reveal(folder) }
             Button("从清单中移除") { sweep.removeFolder(folder) }
-                .disabled(sweep.isBusy)
+                .disabled(sweep.interactionLocked)
         }
     }
 
@@ -230,8 +230,10 @@ struct SweepRecoverFooter: View {
     var body: some View {
         let runs = model.sweep.pendingRuns
         Button {
-            model.sweep.refreshPending()
-            model.sweep.showRecovery = true
+            Task {
+                await model.sweep.refreshPending()
+                model.sweep.showRecovery = true
+            }
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "arrow.uturn.backward")
@@ -251,7 +253,7 @@ struct SweepRecoverFooter: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(model.sweep.isBusy)
+        .disabled(model.sweep.interactionLocked)
         .help(runs.isEmpty ? "项目清理移到废纸篓的内容会在这里留下回执" : "查看移到废纸篓、还能放回的内容")
     }
 }
@@ -281,6 +283,10 @@ struct SweepDetailView: View {
         }
         .background(Color.surfaceBase)
         .navigationTitle("Agent CLI Manager")
+        .onChange(of: model.sweep.selectedFolder) { _, _ in
+            collapsed = [.keep, .blocked]
+            showAll = []
+        }
     }
 
     // MARK: 占位
@@ -339,11 +345,23 @@ struct SweepDetailView: View {
                 .foregroundStyle(Color.textSecondary)
                 .multilineTextAlignment(.center)
                 .textSelection(.enabled)
+            if !model.sweep.excludedPaths(in: folder).isEmpty {
+                Text("已排除 \(model.sweep.excludedPaths(in: folder).count) 项")
+                    .font(.acmCaption)
+                    .foregroundStyle(Color.textSecondary)
+            }
             HStack(spacing: 10) {
                 Button("从清单中移除") { model.sweep.removeFolder(folder) }
                     .buttonStyle(.acmSecondary)
-                Button("重新扫描") { model.sweep.rescan() }
-                    .buttonStyle(.acmPrimary)
+                if error.code == "discovery_permission", let path = error.details["path"] {
+                    Button("排除此目录并重新扫描") { model.sweep.exclude(path, in: folder) }
+                        .buttonStyle(.acmPrimary)
+                    Button("重新扫描") { model.sweep.rescan() }
+                        .buttonStyle(.acmSecondary)
+                } else {
+                    Button("重新扫描") { model.sweep.rescan() }
+                        .buttonStyle(.acmPrimary)
+                }
             }
             .padding(.top, 6)
         }
@@ -444,10 +462,63 @@ struct SweepDetailView: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.visible)
                 .fixedSize()
-                .disabled(sweep.isBusy)
+                .disabled(sweep.interactionLocked)
                 .help("最近还在写入的缓存和依赖不算可清理；这里调整要闲置多久")
             }
+            if !sweep.excludedPaths(in: folder).isEmpty {
+                excludes(sweep.excludedPaths(in: folder), folder: folder)
+            }
+            let residue = sweep.residue(in: folder)
+            if !residue.isEmpty {
+                stagingResidue(residue)
+            }
         }
+    }
+
+    private func stagingResidue(_ residue: [SweepStagingResidue]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("查看残留 · \(residue.count) 处")
+                .font(.acmCaptionMed)
+                .foregroundStyle(Color.textPrimary)
+            ForEach(residue) { item in
+                HStack(spacing: 8) {
+                    Text(model.show(item.path))
+                        .font(.acmMonoPath)
+                        .foregroundStyle(Color.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(item.path)
+                    Spacer(minLength: 8)
+                    Button("在 Finder 中显示") { model.reveal(item.path) }
+                        .buttonStyle(.acmCompact)
+                    if let run = item.run {
+                        Button("放回原处") { Task { await model.sweep.restore(run) } }
+                            .buttonStyle(.acmCompact)
+                            .disabled(model.sweep.isBusy || model.snapshot != nil)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.groupFill, in: RoundedRectangle(cornerRadius: UI.corner))
+    }
+
+    private func excludes(_ paths: [String], folder: String) -> some View {
+        let sweep = model.sweep
+        return Menu {
+            ForEach(paths, id: \.self) { path in
+                Button("取消排除 \(path)") { sweep.unexclude(path, in: folder) }
+            }
+        } label: {
+            Text("已排除 \(paths.count) 项")
+                .font(.acmCaption)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.visible)
+        .fixedSize()
+        .disabled(sweep.interactionLocked)
+        .help("这些路径不参与扫描。点开可逐条取消排除")
     }
 
     private func warnings(_ plan: SweepPlan) -> some View {
@@ -494,6 +565,7 @@ struct SweepDetailView: View {
         return HStack(spacing: 8) {
             if status == .cleanup {
                 ACMCheckbox(state: picked == 0 ? .off : picked == items.count ? .on : .mixed,
+                            enabled: !sweep.interactionLocked,
                             label: "勾选全部可清理项") {
                     sweep.toggleAllCleanup()
                 }
@@ -545,7 +617,7 @@ struct SweepDetailView: View {
     private func actionBar(_ plan: SweepPlan) -> some View {
         let sweep = model.sweep
         let chosen = sweep.selectedItems
-        let blocked = chosen.isEmpty || sweep.isBusy || sweep.isPreparing || sweep.isScanning
+        let blocked = chosen.isEmpty || sweep.interactionLocked
         return HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -584,6 +656,7 @@ struct SweepDetailView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.visible)
             .fixedSize()
+            .disabled(sweep.interactionLocked)
             .help("批量调整勾选")
 
             Button("永久删除…") {
@@ -620,6 +693,7 @@ struct SweepItemRow: View {
         let bytes = item.snapshot?.allocatedBytes ?? 0
         HStack(alignment: .center, spacing: 8) {
             ACMCheckbox(state: item.status != .cleanup ? .protected : sweep.isSelected(item) ? .on : .off,
+                        enabled: !sweep.interactionLocked,
                         label: "勾选 \(PathUtil.lastComponent(item.path))") {
                 sweep.setSelected(item, !sweep.isSelected(item))
             }

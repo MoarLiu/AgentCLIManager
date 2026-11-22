@@ -121,6 +121,15 @@ func sweepErrorCode(_ body: () throws -> Void) -> String {
     }
 }
 
+func sweepErrorText(_ body: () throws -> Void) throws -> String {
+    do {
+        try body()
+        return ""
+    } catch let error as SweepError {
+        return error.message
+    }
+}
+
 // MARK: - 手工拼 ZIP
 
 /// 测试用的最小 ZIP 生成器，只支持「不压缩」和 deflate 两种方式。
